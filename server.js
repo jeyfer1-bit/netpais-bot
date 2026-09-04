@@ -4,6 +4,7 @@ require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
 const { handleMessage } = require('./flow');
+const { setCustomers, getSyncStatus } = require('./customerLookup');
 
 const app = express();
 app.use(express.json());
@@ -97,6 +98,37 @@ async function sendTextMessage(to, body) {
     }
   );
 }
+
+// ---------------------------------------------------------------
+// Endpoint que Power Automate llama (una vez por cada tabla/zona)
+// para mandarnos los datos actuales del Excel.
+// Ejemplo: POST /excel-sync?source=centro
+// ---------------------------------------------------------------
+app.post('/excel-sync', (req, res) => {
+  const secret = req.header('x-sync-secret');
+  if (secret !== process.env.EXCEL_SYNC_SECRET) {
+    return res.status(401).send('Unauthorized');
+  }
+
+  const source = req.query.source || 'default';
+
+  try {
+    // Power Automate manda el resultado de "Listar filas" como
+    // { value: [...] } — pero aceptamos también un arreglo directo
+    // por si acaso.
+    const rows = Array.isArray(req.body) ? req.body : req.body.value;
+    setCustomers(source, rows);
+    res.status(200).json({ ok: true, source, totalCustomers: rows.length });
+  } catch (err) {
+    console.error('Error en /excel-sync:', err.message);
+    res.status(400).json({ ok: false, error: err.message });
+  }
+});
+
+// Para revisar rápidamente, desde el navegador, si ya llegaron datos.
+app.get('/excel-sync/status', (_req, res) => {
+  res.json(getSyncStatus());
+});
 
 // ---------------------------------------------------------------
 app.get('/', (_req, res) => {
