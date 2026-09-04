@@ -59,7 +59,17 @@ function isNegative(text) {
  * @param {string} text - texto que escribió
  * @returns {Promise<string[]>} lista de mensajes a enviar, en orden
  */
+const RESET_WORDS = ['#reset'];
+
 async function handleMessage(phone, text) {
+  const t = text.trim().toLowerCase();
+
+  // -------- Palabra clave de reinicio: funciona en cualquier paso --------
+  if (RESET_WORDS.includes(t)) {
+    resetSession(phone);
+    // getOrCreateSession vuelve a crear la sesión desde cero abajo
+  }
+
   const session = getOrCreateSession(phone);
   const replies = [];
 
