@@ -3,6 +3,7 @@
 require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
+const { handleMessage } = require('./flow');
 
 const app = express();
 app.use(express.json());
@@ -60,32 +61,21 @@ app.post('/webhook', async (req, res) => {
 
     console.log(`📩 Mensaje de ${from} (${type}): ${textBody ?? '[contenido no textual]'}`);
 
-    // ------ Lógica del bot de soporte (punto de partida) ------
-    const reply = buildReply(textBody);
-    await sendTextMessage(from, reply);
+    if (!textBody) {
+      await sendTextMessage(from, 'Por ahora solo puedo leer mensajes de texto 🙏');
+      return;
+    }
+
+    // ------ Flujo conversacional (pipeline) ------
+    const replies = await handleMessage(from, textBody);
+    for (const reply of replies) {
+      await sendTextMessage(from, reply);
+    }
 
   } catch (err) {
     console.error('Error procesando el mensaje entrante:', err?.response?.data || err.message);
   }
 });
-
-// ---------------------------------------------------------------
-// Lógica de respuesta muy simple, para reemplazar por tu propia
-// lógica de soporte (reglas, árbol de decisión, o un LLM)
-// ---------------------------------------------------------------
-function buildReply(text) {
-  if (!text) {
-    return 'Recibí tu mensaje, pero por ahora solo puedo leer texto. ¿Puedes escribirme tu consulta?';
-  }
-  const t = text.trim().toLowerCase();
-  if (t.includes('hola')) {
-    return '¡Hola! 👋 Soy el asistente de soporte. ¿En qué puedo ayudarte hoy?';
-  }
-  if (t.includes('horario')) {
-    return 'Nuestro horario de atención es de lunes a sábado, 9am a 6pm.';
-  }
-  return `Recibí tu mensaje: "${text}". En breve un agente lo revisará (esta es una respuesta de prueba del bot).`;
-}
 
 // ---------------------------------------------------------------
 // Función para enviar un mensaje de texto vía la Cloud API
