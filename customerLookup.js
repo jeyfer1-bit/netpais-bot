@@ -30,7 +30,8 @@ let cache = {
 
 function toDownloadUrl(shareUrl) {
   // Los enlaces de SharePoint/OneDrive personal descargan el archivo
-  // directamente si se les agrega este parámetro.
+  // directamente si se les agrega este parámetro. Si el enlace ya
+  // tiene query params (ej: "?e=xxxxx"), lo agregamos con "&".
   if (shareUrl.includes('download=1')) return shareUrl;
   const separator = shareUrl.includes('?') ? '&' : '?';
   return `${shareUrl}${separator}download=1`;
@@ -43,9 +44,39 @@ async function fetchWorkbookRows() {
   }
 
   const downloadUrl = toDownloadUrl(shareUrl);
-  const response = await axios.get(downloadUrl, {
-    responseType: 'arraybuffer',
-  });
+
+  let response;
+  try {
+    response = await axios.get(downloadUrl, {
+      responseType: 'arraybuffer',
+      maxRedirects: 5,
+      headers: {
+        // Algunos servidores de SharePoint bloquean pedidos sin
+        // un User-Agent de navegador "normal".
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      },
+    });
+  } catch (err) {
+    // Si SharePoint devuelve un error, viene como HTML/texto plano,
+    // no como el archivo. Lo mostramos completo para diagnosticar.
+    const status = err.response?.status;
+    const bodyPreview = err.response?.data
+      ? Buffer.from(err.response.data).toString('utf8').slice(0, 300)
+      : err.message;
+    throw new Error(
+      `No se pudo descargar el Excel (status ${status}): ${bodyPreview}`
+    );
+  }
+
+  const contentType = response.headers['content-type'] || '';
+  if (contentType.includes('text/html')) {
+    // SharePoint devolvió una página web (ej: pantalla de login) en
+    // vez del archivo .xlsx — el enlace no es realmente público.
+    throw new Error(
+      'El enlace de Excel devolvió una página HTML en vez del archivo. Verifica que el enlace sea "Cualquier persona puede ver" y permita descarga.'
+    );
+  }
 
   const workbook = XLSX.read(response.data, { type: 'buffer' });
 
