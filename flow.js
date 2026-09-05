@@ -18,6 +18,12 @@ const {
   translateSignal,
   formatLastStatusChange,
 } = require('./smartolt');
+const {
+  classify,
+  classifySubIssue,
+  buildConfirmationMessage,
+  CLARIFYING_MESSAGE,
+} = require('./novedad');
 
 // sessions: Map<numeroDeWhatsapp, sessionObject>
 const sessions = new Map();
@@ -25,7 +31,8 @@ const sessions = new Map();
 const STEPS = {
   ASK_IS_CLIENT: 'ASK_IS_CLIENT',
   ASK_ID: 'ASK_ID',
-  ASK_REQUIREMENT: 'ASK_REQUIREMENT', // punto de entrada al Flujo 2 (aún no construido)
+  ASK_REQUIREMENT: 'ASK_REQUIREMENT', // Flujo 3: identificar la novedad
+  CONFIRM_NOVEDAD: 'CONFIRM_NOVEDAD', // Flujo 3: confirmar antes de pasar al Flujo 4
 };
 
 const MAX_ID_ATTEMPTS = 3;
@@ -216,12 +223,44 @@ async function handleMessage(phone, text) {
     return replies;
   }
 
-  // -------- Paso: tipo de requerimiento (Flujo 2, pendiente de construir) --------
+  // -------- Paso: identificar la novedad (Flujo 3) --------
   if (session.step === STEPS.ASK_REQUIREMENT) {
-    replies.push(
-      `Anotado: "${text}". (Este es el punto donde va a conectar el Flujo 2 — diagnóstico con SmartOLT y/o creación de ticket.)`
-    );
-    resetSession(phone);
+    const category = classify(text);
+
+    if (!category) {
+      replies.push(CLARIFYING_MESSAGE);
+      return replies; // se queda en el mismo paso hasta lograr identificarla
+    }
+
+    session.novedadCategory = category;
+    session.novedadDetalle =
+      category === 'novedadconservicio' ? classifySubIssue(text) : null;
+
+    replies.push(buildConfirmationMessage(category, session.novedadDetalle));
+    replies.push('¿Es correcto? (sí/no)');
+    session.step = STEPS.CONFIRM_NOVEDAD;
+    return replies;
+  }
+
+  // -------- Paso: confirmar la novedad identificada --------
+  if (session.step === STEPS.CONFIRM_NOVEDAD) {
+    if (isAffirmative(text)) {
+      replies.push(
+        'Perfecto, dame un momento mientras continúo con tu solicitud. 🙌 ' +
+        `(Aquí conecta el Flujo 4, según la categoría: ${session.novedadCategory}.)`
+      );
+      resetSession(phone);
+      return replies;
+    }
+
+    if (isNegative(text)) {
+      replies.push('Ok, cuéntame de nuevo con tus palabras qué necesitas 🙂');
+      replies.push(CLARIFYING_MESSAGE);
+      session.step = STEPS.ASK_REQUIREMENT;
+      return replies;
+    }
+
+    replies.push('¿Podrías confirmarme con un *sí* o un *no*, por favor? 🙂');
     return replies;
   }
 
