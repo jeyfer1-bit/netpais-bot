@@ -39,18 +39,51 @@ function resetSession(phone) {
   sessions.delete(phone);
 }
 
+function normalize(text) {
+  return text
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, ''); // quita acentos: sí -> si
+}
+
+// Se usa \b (límite de palabra) para no confundir "si" dentro de
+// "asisti" o "positivo", por ejemplo.
+const AFFIRMATIVE_PATTERNS = [
+  /\bsi+\b/, // si, sii, siii...
+  /\bsip\b/,
+  /\bclaro\b/,
+  /\bobvio\b/,
+  /\bpor supuesto\b/,
+  /\bcorrecto\b/,
+  /\bexacto\b/,
+  /\bafirmativo\b/,
+  /\basi es\b/,
+  /\beso es\b/,
+  /\byes\b/,
+  /\byep\b/,
+];
+
+const NEGATIVE_PATTERNS = [
+  /\bno+\b/, // no, noo...
+  /\bnel\b/,
+  /\bnop+e?\b/, // nop, nope
+  /\bnegativo\b/,
+  /\bpara nada\b/,
+  /\bque va\b/,
+  /\baun no\b/,
+  /\btodavia no\b/,
+  /\bno soy\b/,
+];
+
 function isAffirmative(text) {
-  const t = text.trim().toLowerCase();
-  return ['si', 'sí', 'claro', 'correcto', 'exacto', 'sip', 'afirmativo'].some(
-    (word) => t === word || t.startsWith(word + ' ')
-  );
+  const t = normalize(text);
+  return AFFIRMATIVE_PATTERNS.some((pattern) => pattern.test(t));
 }
 
 function isNegative(text) {
-  const t = text.trim().toLowerCase();
-  return ['no', 'nel', 'negativo', 'no soy'].some(
-    (word) => t === word || t.startsWith(word + ' ')
-  );
+  const t = normalize(text);
+  return NEGATIVE_PATTERNS.some((pattern) => pattern.test(t));
 }
 
 /**
