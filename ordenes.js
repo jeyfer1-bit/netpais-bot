@@ -32,10 +32,14 @@ async function fetchOrdenesYTipificacion(abonado) {
     { headers: { 'Content-Type': 'application/json' } }
   );
 
-  return {
-    ordenes: response.data?.ordenes || [],
-    tipificacion: response.data?.tipificacion || [],
-  };
+  const ordenes = response.data?.ordenes || [];
+  const tipificacion = response.data?.tipificacion || [];
+
+  console.log(
+    `📋 Consulta de órdenes para ${abonado}: ${ordenes.length} orden(es), ${tipificacion.length} fila(s) de tipificación`
+  );
+
+  return { ordenes, tipificacion };
 }
 
 function isOpen(orden) {
@@ -132,7 +136,7 @@ async function checkOrdenStatus(abonado) {
         registrarIncumplimientoSLA(abonado, orden);
       } else if (tiempoHoras) {
         replies.push(
-          `Tu orden "${orden.detalle_orden}" está dentro del tiempo estimado — será atendida en aproximadamente ${tiempoHoras} horas, según su tipo y prioridad.`
+          `Tu orden "${orden.detalle_orden}" está dentro de nuestro tiempo de atención — será atendida en un tiempo máximo de ${tiempoHoras} horas, según su tipo y prioridad.`
         );
       } else {
         replies.push(
