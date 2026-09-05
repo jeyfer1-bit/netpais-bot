@@ -16,6 +16,7 @@ const {
   getOnuSignal,
   translateStatus,
   translateSignal,
+  formatLastStatusChange,
 } = require('./smartolt');
 
 // sessions: Map<numeroDeWhatsapp, sessionObject>
@@ -177,9 +178,9 @@ async function handleMessage(phone, text) {
       const onu = await getOnuSignal(customer.abonado);
       if (onu) {
         replies.push(
-          `Su servicio fue validado y actualmente su estado de conexión es ${translateStatus(onu.status)}, ` +
-          `el estado de su señal es ${translateSignal(onu.signal)} ` +
-          `y el último cambio de estado de su conexión fue ${onu.lastStatusChange}.`
+          `¡Listo! Ya validé tu servicio 🙌 Tu conexión está ${translateStatus(onu.status)}, ` +
+          `la señal está ${translateSignal(onu.signal)}, ` +
+          `y el último cambio fue el ${formatLastStatusChange(onu.lastStatusChange)}.`
         );
       } else {
         replies.push(

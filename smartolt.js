@@ -4,14 +4,11 @@
 // netpaís tiene una instalación de SmartOLT distinta por ciudad; el
 // prefijo del número de abonado nos dice a cuál conectarnos.
 //
-// SmartOLT identifica cada ONU por su "unique_external_id" (el serial
-// del equipo), NO por el abonado. El abonado vive dentro del campo
-// "Name" del ONU (ej: "IBA007342 - 5833517 - JOSE PAEZ"). Por eso la
-// consulta se hace en 2 pasos:
-//   1) Buscar el ONU filtrando por "name" = abonado -> sacar su
-//      unique_external_id (serial).
-//   2) Con ese serial, consultar estado (get_onu_status) y señal
-//      (get_onu_signal).
+// IMPORTANTE — límite de SmartOLT: "get_all_onus_details" solo
+// permite 15 llamadas por hora (por API key). Como esa lista casi no
+// cambia, la traemos completa UNA VEZ POR HORA y la guardamos en
+// memoria. Las consultas de cada cliente ("get_onu_status" y
+// "get_onu_signal", con límite de 500/hora) sí se hacen en vivo.
 
 const axios = require('axios');
 
@@ -23,14 +20,20 @@ const PREFIX_TO_CITY = {
   LPT: 'lospatios',
 };
 
+const ONU_LIST_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hora
+
+// cache[city] = { fetchedAt: number, entries: [{ name, externalId, apiKey }] }
+const cache = {};
+// refreshing[city] = Promise en curso, para no disparar 2 refrescos a la vez
+const refreshing = {};
+
 function getCityFromAbonado(abonado) {
   const prefix = String(abonado).trim().slice(0, 3).toUpperCase();
   return PREFIX_TO_CITY[prefix] || null;
 }
 
 // Credenciales por ciudad. Algunas ciudades tienen más de un OLT
-// (ej: Ibagué tiene 2), así que guardamos un arreglo de API keys por
-// ciudad y probamos cada una hasta encontrar el ONU.
+// (ej: Ibagué tiene 2), así que guardamos un arreglo de API keys.
 // Variables de entorno esperadas, ej. para Ibagué:
 //   SMARTOLT_IBAGUE_URL=https://clancolombia-ibague.smartolt.com
 //   SMARTOLT_IBAGUE_API_KEYS=282956cd46584dd7b56c7d0a5ef937db,af0b3286da1e42acbcfc06148e13e2a5
@@ -42,32 +45,54 @@ function getCityConfig(city) {
   return { baseUrl, apiKeys };
 }
 
-/**
- * Busca el ONU cuyo "Name" empiece con el abonado, y devuelve su
- * unique_external_id (serial). Devuelve null si no está en este OLT.
- */
-async function findOnuExternalId(baseUrl, apiKey, abonado) {
-  try {
-    const response = await axios.get(`${baseUrl}/api/onu/get_all_onus_details`, {
-      headers: { 'X-Token': apiKey },
-      params: { name: abonado, page: 1, page_size: 5 },
-      validateStatus: (s) => s === 200 || s === 400,
-    });
+// Trae TODOS los ONUs de TODOS los OLTs de una ciudad (1 llamada por
+// OLT, sin paginar) y los guarda en cache.
+async function refreshCityOnuList(city) {
+  const { baseUrl, apiKeys } = getCityConfig(city);
+  let entries = [];
 
-    if (response.status !== 200 || !Array.isArray(response.data?.onus)) {
-      return null;
+  for (const apiKey of apiKeys) {
+    try {
+      const response = await axios.get(`${baseUrl}/api/onu/get_all_onus_details`, {
+        headers: { 'X-Token': apiKey },
+      });
+      const onus = response.data?.onus || [];
+      entries = entries.concat(
+        onus.map((onu) => ({
+          name: onu.name || '',
+          externalId: onu.unique_external_id || onu.sn,
+          apiKey,
+        }))
+      );
+    } catch (err) {
+      console.warn(`⚠️  Error trayendo lista de ONUs de SmartOLT (${city}):`, err.message);
     }
-
-    const abonadoUpper = abonado.toUpperCase();
-    const match = response.data.onus.find((onu) =>
-      String(onu.name || '').toUpperCase().startsWith(abonadoUpper)
-    );
-
-    return match ? match.unique_external_id || match.sn : null;
-  } catch (err) {
-    console.warn('⚠️  Error buscando ONU por nombre en SmartOLT:', err.message);
-    return null;
   }
+
+  cache[city] = { fetchedAt: Date.now(), entries };
+  console.log(`🔄 SmartOLT (${city}): ${entries.length} ONUs cacheados`);
+}
+
+async function getCityOnuList(city) {
+  const cached = cache[city];
+  const isStale = !cached || Date.now() - cached.fetchedAt > ONU_LIST_CACHE_TTL_MS;
+
+  if (isStale) {
+    // Evita refrescos duplicados si llegan varias consultas a la vez
+    if (!refreshing[city]) {
+      refreshing[city] = refreshCityOnuList(city).finally(() => {
+        delete refreshing[city];
+      });
+    }
+    await refreshing[city];
+  }
+
+  return cache[city]?.entries || [];
+}
+
+function findOnuInList(entries, abonado) {
+  const abonadoUpper = abonado.toUpperCase();
+  return entries.find((e) => e.name.toUpperCase().startsWith(abonadoUpper));
 }
 
 async function fetchOnuField(baseUrl, apiKey, externalId, path) {
@@ -84,8 +109,7 @@ async function fetchOnuField(baseUrl, apiKey, externalId, path) {
 }
 
 /**
- * Consulta el estado/señal del ONU asociado a un abonado, probando
- * cada OLT (API key) configurado para su ciudad hasta encontrarlo.
+ * Consulta el estado/señal del ONU asociado a un abonado.
  * @param {string} abonado - número de abonado (ej: "IBA007342")
  * @returns {Promise<{status:string, signal:string, lastStatusChange:string}|null>}
  */
@@ -102,29 +126,26 @@ async function getOnuSignal(abonado) {
     return null;
   }
 
-  for (const apiKey of apiKeys) {
-    const externalId = await findOnuExternalId(baseUrl, apiKey, abonado);
-    if (!externalId) continue; // no está en este OLT, probamos el siguiente
+  const entries = await getCityOnuList(city);
+  const match = findOnuInList(entries, abonado);
+  if (!match) return null; // no está en la lista cacheada de esta ciudad
 
-    const [statusData, signalData] = await Promise.all([
-      fetchOnuField(baseUrl, apiKey, externalId, '/api/onu/get_onu_status'),
-      fetchOnuField(baseUrl, apiKey, externalId, '/api/onu/get_onu_signal'),
-    ]);
+  const [statusData, signalData] = await Promise.all([
+    fetchOnuField(baseUrl, match.apiKey, match.externalId, '/api/onu/get_onu_status'),
+    fetchOnuField(baseUrl, match.apiKey, match.externalId, '/api/onu/get_onu_signal'),
+  ]);
 
-    return {
-      status: statusData?.onu_status || '',
-      lastStatusChange: statusData?.last_status_change || 'N/D',
-      signal: signalData?.onu_signal || '',
-    };
-  }
-
-  return null; // no se encontró en ningún OLT de la ciudad
+  return {
+    status: statusData?.onu_status || '',
+    lastStatusChange: statusData?.last_status_change || 'N/D',
+    signal: signalData?.onu_signal || '',
+  };
 }
 
 // Traduce los valores crudos de SmartOLT a frases claras para el cliente.
 function translateStatus(status) {
   const map = {
-    online: 'en línea (conexión OK)',
+    online: 'en línea',
     offline: 'sin conexión de fibra óptica',
     'power fail': 'sin conexión a energía eléctrica',
     los: 'sin conexión de energía y fibra óptica',
@@ -143,8 +164,27 @@ function translateSignal(signal) {
   return 'sin señal de conexión de fibra óptica';
 }
 
+// SmartOLT manda algo como "2026-09-02 02:45:47.425187" — lo
+// convertimos a algo legible como "2 de septiembre, 2:45 a. m."
+function formatLastStatusChange(rawDate) {
+  if (!rawDate || rawDate === 'N/D') return 'sin datos recientes';
+
+  const cleaned = rawDate.split('.')[0].replace(' ', 'T');
+  const date = new Date(cleaned);
+  if (isNaN(date.getTime())) return rawDate;
+
+  return date.toLocaleString('es-CO', {
+    day: 'numeric',
+    month: 'long',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+  });
+}
+
 module.exports = {
   getOnuSignal,
   translateStatus,
   translateSignal,
+  formatLastStatusChange,
 };
