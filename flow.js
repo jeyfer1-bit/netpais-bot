@@ -45,6 +45,10 @@ const STEPS = {
   NOV_ASK_DEVICE_SCOPE: 'NOV_ASK_DEVICE_SCOPE', // ¿todos los dispositivos o uno solo?
   NOV_ASK_TIME_PATTERN: 'NOV_ASK_TIME_PATTERN', // ¿todo el tiempo o franja horaria?
   NOV_ASK_SINGLE_DEVICE_RESULT: 'NOV_ASK_SINGLE_DEVICE_RESULT', // resultado de validaciones en 1 solo equipo
+
+  // Flujo 2: problemas con aplicaciones o páginas web
+  NOV_APP_ASK_NAME: 'NOV_APP_ASK_NAME', // ¿qué página/app presenta la novedad?
+  NOV_APP_ASK_MOBILE_RESULT: 'NOV_APP_ASK_MOBILE_RESULT', // ¿persiste usando datos móviles?
 };
 
 const REBOOT_WAIT_MS = 2 * 60 * 1000; // 2 minutos
@@ -172,6 +176,21 @@ async function buildCrearOrdenMessage(abonado, detalleOrden) {
     (tiempo ? `, la cual será atendida en un máximo de ${tiempo}.` : '.')
   );
 }
+
+// -------- Incidente conocido: entrega de video de Google/YouTube --------
+// Basado en el comunicado oficial de Ufinet 08/2026. Se actualiza el
+// mensaje (o se retira este bloque) cuando Google confirme la solución.
+const KNOWN_INCIDENT_KEYWORDS = ['youtube', 'google'];
+
+function isKnownVideoIncident(appName) {
+  const t = normalize(appName);
+  return KNOWN_INCIDENT_KEYWORDS.some((k) => t.includes(k));
+}
+
+const KNOWN_INCIDENT_MESSAGE =
+  'Tenemos identificada esta situación 🙌 Actualmente hay una afectación en la entrega de contenido de video de Google/YouTube que impacta a varios usuarios en Colombia, especialmente entre las 7 p. m. y las 11 p. m.\n\n' +
+  'Esto ocurre porque los servidores de caché de Google en Bogotá llegan a su límite de capacidad en esas horas, y el contenido empieza a traerse desde ciudades más lejanas (Miami, Nueva York, y en algunos casos Brasil o Chile), lo que aumenta la latencia. No es una falla de nuestra red: nuestros enlaces están activos y sin pérdida de paquetes.\n\n' +
+  'Ufinet está en seguimiento diario con Google, quien informó que la ampliación de capacidad en Bogotá estaría entrando en operación hacia finales de agosto de 2026.';
 
 /**
  * Procesa un mensaje entrante y devuelve el/los mensaje(s) de respuesta.
@@ -349,6 +368,12 @@ async function handleMessage(phone, text) {
       }
 
       if (session.novedadCategory === 'novedadconservicio') {
+        if (session.novedadDetalle === 'problemas con aplicaciones o páginas web') {
+          replies.push('Cuéntame, ¿qué página web o aplicación te está presentando la novedad?');
+          session.step = STEPS.NOV_APP_ASK_NAME;
+          return replies;
+        }
+
         const onu = await getOnuSignal(session.customer.abonado);
 
         if (!onu) {
@@ -633,6 +658,51 @@ async function handleMessage(phone, text) {
     return replies;
   }
 
+  // -------- Flujo 2: nombre de la página/app con novedad --------
+  if (session.step === STEPS.NOV_APP_ASK_NAME) {
+    const appName = text.trim();
+    session.novAppName = appName;
+
+    if (isKnownVideoIncident(appName)) {
+      replies.push(KNOWN_INCIDENT_MESSAGE);
+      replies.push('¿Hay algo más en lo que pueda ayudarte? (sí/no)');
+      session.step = STEPS.ASK_ANYTHING_ELSE;
+      return replies;
+    }
+
+    replies.push(
+      `Vamos a hacer una validación con "${appName}":\n\n` +
+      '1️⃣ Desconéctate del WiFi y conéctate por datos móviles.\n' +
+      '2️⃣ Intenta ingresar nuevamente.\n\n' +
+      '¿El problema persiste usando datos móviles? (sí/no)'
+    );
+    session.step = STEPS.NOV_APP_ASK_MOBILE_RESULT;
+    return replies;
+  }
+
+  // -------- Flujo 2: resultado de la prueba con datos móviles --------
+  if (session.step === STEPS.NOV_APP_ASK_MOBILE_RESULT) {
+    if (isAffirmative(text)) {
+      replies.push(
+        `Entiendo. Como el problema persiste incluso usando datos móviles (una red distinta a la nuestra), esto indica que la falla está del lado del servidor de "${session.novAppName}" y no de nuestra red.`
+      );
+      replies.push('¿Hay algo más en lo que pueda ayudarte? (sí/no)');
+      session.step = STEPS.ASK_ANYTHING_ELSE;
+      return replies;
+    }
+
+    if (isNegative(text)) {
+      replies.push(`Lamento la situación con "${session.novAppName}".`);
+      replies.push(await buildCrearOrdenMessage(session.customer.abonado, 'BLOQUEO DE PÁGINAS'));
+      replies.push('¿Hay algo más en lo que pueda ayudarte? (sí/no)');
+      session.step = STEPS.ASK_ANYTHING_ELSE;
+      return replies;
+    }
+
+    replies.push('¿Podrías confirmarme con un *sí* o un *no*? ¿El problema persiste usando datos móviles?');
+    return replies;
+  }
+
   // -------- Paso: ¿necesita algo más tras consultar la orden? --------
   if (session.step === STEPS.ASK_ANYTHING_ELSE) {
     if (isAffirmative(text)) {
@@ -645,6 +715,7 @@ async function handleMessage(phone, text) {
       session.novDeviceScope = null;
       session.novAlreadyRebooted = false;
       session.novRebootAt = null;
+      session.novAppName = null;
       session.step = STEPS.ASK_REQUIREMENT;
       return replies;
     }
