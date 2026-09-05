@@ -193,4 +193,17 @@ async function checkOrdenStatus(abonado) {
   return replies;
 }
 
-module.exports = { checkOrdenStatus };
+/**
+ * Devuelve el texto de "Tiempo" (SLA) definido en la tabla Tipificación
+ * para un detalle_orden específico (ej: "24 horas"), o null si no se
+ * encuentra. Por ahora no existe una API para CREAR la orden en Excel —
+ * esto solo se usa para informarle al cliente cuánto tardará, mientras
+ * se habilita esa API.
+ */
+async function getTiempoEstimado(abonado, detalleOrden) {
+  const { tipificacion } = await fetchOrdenesYTipificacion(abonado);
+  const tip = findTipificacion(tipificacion, detalleOrden);
+  return tip ? tip.Tiempo : null;
+}
+
+module.exports = { checkOrdenStatus, getTiempoEstimado };

@@ -17,6 +17,7 @@ const {
   translateStatus,
   translateSignal,
   formatLastStatusChange,
+  rebootOnu,
 } = require('./smartolt');
 const {
   classify,
@@ -24,7 +25,7 @@ const {
   buildConfirmationMessage,
   CLARIFYING_MESSAGE,
 } = require('./novedad');
-const { checkOrdenStatus } = require('./ordenes');
+const { checkOrdenStatus, getTiempoEstimado } = require('./ordenes');
 
 // sessions: Map<numeroDeWhatsapp, sessionObject>
 const sessions = new Map();
@@ -34,8 +35,19 @@ const STEPS = {
   ASK_ID: 'ASK_ID',
   ASK_REQUIREMENT: 'ASK_REQUIREMENT', // Flujo 3: identificar la novedad
   CONFIRM_NOVEDAD: 'CONFIRM_NOVEDAD', // Flujo 3: confirmar antes de pasar al Flujo 4
-  ASK_ANYTHING_ELSE: 'ASK_ANYTHING_ELSE', // Tras consultar la orden: ¿algo más o cerramos?
+  ASK_ANYTHING_ELSE: 'ASK_ANYTHING_ELSE', // Tras resolver la novedad: ¿algo más o cerramos?
+
+  // Flujo 2: intermitencia/lentitud (categoría "novedadconservicio")
+  NOV_ASK_LED_COLOR: 'NOV_ASK_LED_COLOR', // sin señal (LOS/Offline): pedir color de LED
+  NOV_ASK_SERVICE_OK: 'NOV_ASK_SERVICE_OK', // pedir confirmar si el servicio ya funciona
+  NOV_ASK_REBOOT_CONFIRM: 'NOV_ASK_REBOOT_CONFIRM', // pedir autorización para reiniciar
+  NOV_WAITING_REBOOT: 'NOV_WAITING_REBOOT', // esperando los 2 minutos post-reinicio
+  NOV_ASK_DEVICE_SCOPE: 'NOV_ASK_DEVICE_SCOPE', // ¿todos los dispositivos o uno solo?
+  NOV_ASK_TIME_PATTERN: 'NOV_ASK_TIME_PATTERN', // ¿todo el tiempo o franja horaria?
+  NOV_ASK_SINGLE_DEVICE_RESULT: 'NOV_ASK_SINGLE_DEVICE_RESULT', // resultado de validaciones en 1 solo equipo
 };
+
+const REBOOT_WAIT_MS = 2 * 60 * 1000; // 2 minutos
 
 const MAX_ID_ATTEMPTS = 3;
 
@@ -99,6 +111,66 @@ function isAffirmative(text) {
 function isNegative(text) {
   const t = normalize(text);
   return NEGATIVE_PATTERNS.some((pattern) => pattern.test(t));
+}
+
+// -------- Clasificadores de texto libre para el Flujo 2 --------
+
+function classifyLedColor(text) {
+  const t = normalize(text);
+  if (/\bverde/.test(t)) return 'verde';
+  if (/\brojo/.test(t)) return 'rojo';
+  return null;
+}
+
+function classifyDeviceScope(text) {
+  const t = normalize(text);
+  if (t === '1' || /\btodos\b/.test(t) || /\btodo(s)? los dispositivos\b/.test(t)) return 'todos';
+  if (
+    t === '2' ||
+    /\bsolo uno\b/.test(t) ||
+    /\buno solo\b/.test(t) ||
+    /\bun (dispositivo|equipo|celular|computador|pc)\b/.test(t) ||
+    t === 'uno'
+  ) {
+    return 'uno';
+  }
+  return null;
+}
+
+function classifyTimePattern(text) {
+  const t = normalize(text);
+  if (t === '1' || /\btodo el tiempo\b/.test(t) || /\bsiempre\b/.test(t) || /\bconstante/.test(t)) return 'siempre';
+  if (
+    t === '2' ||
+    /\bhorario\b/.test(t) ||
+    /\bfranja\b/.test(t) ||
+    /\bhoras\b/.test(t) ||
+    /\bnoche\b/.test(t) ||
+    /\btarde\b/.test(t)
+  ) {
+    return 'franja';
+  }
+  return null;
+}
+
+function classifyImprovement(text) {
+  const t = normalize(text);
+  if (/\bmejor/.test(t) || /\bsolucion/.test(t) || isAffirmative(text)) return 'mejoro';
+  if (/\bigual\b/.test(t) || /\bsigue\b/.test(t) || /\bpeor\b/.test(t) || isNegative(text)) return 'igual';
+  return null;
+}
+
+/**
+ * Construye el mensaje de "voy a crear una orden de..." incluyendo el
+ * tiempo estimado desde Tipificación. No inserta la orden en ningún
+ * lado todavía (falta la API de creación) — solo informa al cliente.
+ */
+async function buildCrearOrdenMessage(abonado, detalleOrden) {
+  const tiempo = await getTiempoEstimado(abonado, detalleOrden);
+  return (
+    `Vamos a crear una orden de visita técnica por "${detalleOrden}"` +
+    (tiempo ? `, la cual será atendida en un máximo de ${tiempo}.` : '.')
+  );
 }
 
 /**
@@ -276,6 +348,48 @@ async function handleMessage(phone, text) {
         return replies;
       }
 
+      if (session.novedadCategory === 'novedadconservicio') {
+        const onu = await getOnuSignal(session.customer.abonado);
+
+        if (!onu) {
+          replies.push(
+            'No pude validar automáticamente el estado de tu conexión en este momento. Te voy a comunicar con un asesor. 🙌'
+          );
+          resetSession(phone);
+          return replies;
+        }
+
+        const status = String(onu.status).toLowerCase();
+        const signal = String(onu.signal).toLowerCase();
+
+        // Caso 1: alerta de señal (warning/critical)
+        if (signal === 'warning' || signal === 'critical') {
+          replies.push(
+            'Actualmente el nivel de potencia de la señal que llega por fibra óptica no es el adecuado.'
+          );
+          replies.push(await buildCrearOrdenMessage(session.customer.abonado, 'POTENCIAS BAJAS/FUERA DE RANGO'));
+          replies.push('¿Hay algo más en lo que pueda ayudarte? (sí/no)');
+          session.step = STEPS.ASK_ANYTHING_ELSE;
+          return replies;
+        }
+
+        // Caso 2: sin señal (offline / LOS / power fail)
+        if (status !== 'online') {
+          replies.push(
+            'Vamos a hacer unas validaciones rápidas: 1️⃣ Verifica que el módem esté conectado a la corriente y que sus luces LED estén encendidas. 2️⃣ Revisa la fibra de color negro que entra a tu hogar y llega hasta una cajita blanca. 3️⃣ Revisa el patch cord amarillo que sale de esa caja y va hasta el módem por debajo. Cuéntame, ¿de qué color están los LED del módem?'
+          );
+          session.step = STEPS.NOV_ASK_LED_COLOR;
+          return replies;
+        }
+
+        // Caso 3: señal "very good", sin alertas
+        replies.push(
+          'Para orientar mejor el diagnóstico, cuéntame: ¿el problema se presenta 1️⃣ en todos tus dispositivos o 2️⃣ solo en uno?'
+        );
+        session.step = STEPS.NOV_ASK_DEVICE_SCOPE;
+        return replies;
+      }
+
       replies.push(
         'Perfecto, dame un momento mientras continúo con tu solicitud. 🙌 ' +
         `(Aquí conecta el Flujo 4, según la categoría: ${session.novedadCategory}.)`
@@ -295,6 +409,208 @@ async function handleMessage(phone, text) {
     return replies;
   }
 
+  // -------- Flujo 2: color de LED (caso "sin señal") --------
+  if (session.step === STEPS.NOV_ASK_LED_COLOR) {
+    const led = classifyLedColor(text);
+
+    if (led === 'rojo') {
+      replies.push('Entiendo, esto indica una falla en la fibra óptica que llega hasta tu hogar.');
+      replies.push(await buildCrearOrdenMessage(session.customer.abonado, 'SIN SERVICIO CORTE DE FIBRA ÓPTICA'));
+      replies.push('¿Hay algo más en lo que pueda ayudarte? (sí/no)');
+      session.step = STEPS.ASK_ANYTHING_ELSE;
+      return replies;
+    }
+
+    if (led === 'verde') {
+      const onu = await getOnuSignal(session.customer.abonado);
+      const isOk = onu && String(onu.status).toLowerCase() === 'online' && String(onu.signal).toLowerCase() === 'very good';
+      session.novPendingOrder = 'SIN SERVICIO CONFIGURACIÓN ONT';
+
+      if (isOk) {
+        replies.push(
+          'Perfecto, técnicamente el equipo ya se ve en línea con buena señal. Por favor verifica el servicio en tus dispositivos y cuéntame: ¿ya te está funcionando? (sí/no)'
+        );
+        session.novAlreadyRebooted = false;
+        session.step = STEPS.NOV_ASK_SERVICE_OK;
+        return replies;
+      }
+
+      replies.push(
+        'Sigo detectando la falla desde nuestro sistema. Vamos a intentar un reinicio remoto del equipo para tratar de resincronizarlo, ¿estás de acuerdo? (sí/no)'
+      );
+      session.step = STEPS.NOV_ASK_REBOOT_CONFIRM;
+      return replies;
+    }
+
+    replies.push('No logré identificar el color 🙏 ¿Podrías confirmarme de qué color están los LED del módem (verde o rojo)?');
+    return replies;
+  }
+
+  // -------- Flujo 2: ¿el servicio ya funciona? --------
+  if (session.step === STEPS.NOV_ASK_SERVICE_OK) {
+    if (isAffirmative(text)) {
+      replies.push('¡Excelente! Me alegra que ya esté funcionando. 🙌');
+      replies.push('¿Hay algo más en lo que pueda ayudarte? (sí/no)');
+      session.step = STEPS.ASK_ANYTHING_ELSE;
+      return replies;
+    }
+
+    if (isNegative(text)) {
+      if (session.novAlreadyRebooted) {
+        replies.push('Entiendo.');
+        replies.push(await buildCrearOrdenMessage(session.customer.abonado, session.novPendingOrder));
+        replies.push('¿Hay algo más en lo que pueda ayudarte? (sí/no)');
+        session.step = STEPS.ASK_ANYTHING_ELSE;
+        return replies;
+      }
+
+      replies.push(
+        'Entiendo, vamos a intentar un reinicio remoto del equipo para tratar de resincronizarlo, ¿estás de acuerdo? (sí/no)'
+      );
+      session.step = STEPS.NOV_ASK_REBOOT_CONFIRM;
+      return replies;
+    }
+
+    replies.push('¿Podrías confirmarme con un *sí* o un *no*? ¿Ya te está funcionando el servicio?');
+    return replies;
+  }
+
+  // -------- Flujo 2: autorización para reiniciar el equipo --------
+  if (session.step === STEPS.NOV_ASK_REBOOT_CONFIRM) {
+    if (isAffirmative(text)) {
+      let success = false;
+      try {
+        success = await rebootOnu(session.customer.abonado);
+      } catch (err) {
+        console.error('Error reiniciando ONU:', err.message);
+      }
+
+      if (!success) {
+        replies.push('No pude enviar el comando de reinicio al equipo en este momento. Te voy a comunicar con un asesor. 🙌');
+        resetSession(phone);
+        return replies;
+      }
+
+      replies.push('Listo, envié el comando de reinicio. 🔄 Por favor espera un máximo de 2 minutos mientras el equipo vuelve a sincronizar.');
+      session.novRebootAt = Date.now();
+      session.novAlreadyRebooted = true;
+      session.step = STEPS.NOV_WAITING_REBOOT;
+      return replies;
+    }
+
+    if (isNegative(text)) {
+      replies.push('Entiendo, sin problema.');
+      replies.push(await buildCrearOrdenMessage(session.customer.abonado, session.novPendingOrder));
+      replies.push('¿Hay algo más en lo que pueda ayudarte? (sí/no)');
+      session.step = STEPS.ASK_ANYTHING_ELSE;
+      return replies;
+    }
+
+    replies.push('¿Podrías confirmarme con un *sí* o un *no*? ¿Estás de acuerdo con que reinicie el equipo de forma remota?');
+    return replies;
+  }
+
+  // -------- Flujo 2: esperando los 2 minutos post-reinicio --------
+  if (session.step === STEPS.NOV_WAITING_REBOOT) {
+    const elapsed = Date.now() - (session.novRebootAt || 0);
+
+    if (elapsed < REBOOT_WAIT_MS) {
+      replies.push(
+        'Espera un poco más 🙏 El equipo todavía está terminando de sincronizar (hasta 2 minutos en total desde el reinicio). En cuanto pase ese tiempo, verificamos de nuevo.'
+      );
+      return replies;
+    }
+
+    // Ya pasaron los 2 minutos: revalidamos técnicamente (queda en el log)
+    // y le pedimos al cliente que confirme desde su experiencia real.
+    try {
+      const onu = await getOnuSignal(session.customer.abonado);
+      console.log(
+        `🔁 Post-reinicio (${session.customer.abonado}): status=${onu?.status}, signal=${onu?.signal}`
+      );
+    } catch (err) {
+      console.warn('No pude revalidar SmartOLT post-reinicio:', err.message);
+    }
+
+    replies.push('Listo, ya pasó el tiempo de espera. Por favor verifica el servicio en tus dispositivos y cuéntame: ¿ya te está funcionando? (sí/no)');
+    session.step = STEPS.NOV_ASK_SERVICE_OK;
+    return replies;
+  }
+
+  // -------- Flujo 2: ¿en todos los dispositivos o en uno solo? --------
+  if (session.step === STEPS.NOV_ASK_DEVICE_SCOPE) {
+    const scope = classifyDeviceScope(text);
+
+    if (!scope) {
+      replies.push('¿Podrías indicarme con el número, por favor? 1️⃣ Todos los dispositivos, 2️⃣ Solo uno.');
+      return replies;
+    }
+
+    session.novDeviceScope = scope;
+    replies.push('Entendido. ¿Y esto ocurre 1️⃣ todo el tiempo o 2️⃣ solo en un horario específico (por ejemplo, en la noche)?');
+    session.step = STEPS.NOV_ASK_TIME_PATTERN;
+    return replies;
+  }
+
+  // -------- Flujo 2: ¿todo el tiempo o en una franja horaria? --------
+  if (session.step === STEPS.NOV_ASK_TIME_PATTERN) {
+    const pattern = classifyTimePattern(text);
+
+    if (!pattern) {
+      replies.push('¿Podrías indicarme con el número, por favor? 1️⃣ Todo el tiempo, 2️⃣ Solo en un horario específico.');
+      return replies;
+    }
+
+    if (pattern === 'franja') {
+      replies.push(
+        'Es posible que estemos presentando saturación en horas pico, entre las 7 p. m. y las 10 p. m. Vamos a escalar tu caso con el equipo de ingeniería para darte una solución lo antes posible.'
+      );
+      replies.push('¿Hay algo más en lo que pueda ayudarte? (sí/no)');
+      session.step = STEPS.ASK_ANYTHING_ELSE;
+      return replies;
+    }
+
+    // pattern === 'siempre'
+    session.novPendingOrder = 'INTERMITENCIA/LENTITUD INTERNET';
+
+    if (session.novDeviceScope === 'todos') {
+      replies.push(
+        'Entendido, vamos a intentar un reinicio remoto del equipo para tratar de resincronizarlo, ¿estás de acuerdo? (sí/no)'
+      );
+      session.step = STEPS.NOV_ASK_REBOOT_CONFIRM;
+      return replies;
+    }
+
+    // scope === 'uno'
+    replies.push(
+      'Vamos a hacer unas validaciones: 1️⃣ Conéctate a la red de 5GHz si tu módem la tiene. 2️⃣ Realiza una prueba de velocidad cerca del módem. 3️⃣ Haz una prueba de navegación o reproducción de un video. Cuéntame cómo te fue: ¿mejoró o sigue igual?'
+    );
+    session.step = STEPS.NOV_ASK_SINGLE_DEVICE_RESULT;
+    return replies;
+  }
+
+  // -------- Flujo 2: resultado de las validaciones en un solo equipo --------
+  if (session.step === STEPS.NOV_ASK_SINGLE_DEVICE_RESULT) {
+    const result = classifyImprovement(text);
+
+    if (result === 'mejoro') {
+      replies.push('¡Excelente! Me alegra que haya mejorado. 🙌');
+      replies.push('¿Hay algo más en lo que pueda ayudarte? (sí/no)');
+      session.step = STEPS.ASK_ANYTHING_ELSE;
+      return replies;
+    }
+
+    if (result === 'igual') {
+      replies.push(await buildCrearOrdenMessage(session.customer.abonado, session.novPendingOrder));
+      replies.push('¿Hay algo más en lo que pueda ayudarte? (sí/no)');
+      session.step = STEPS.ASK_ANYTHING_ELSE;
+      return replies;
+    }
+
+    replies.push('Cuéntame, ¿mejoró la conexión en ese dispositivo o sigue igual?');
+    return replies;
+  }
+
   // -------- Paso: ¿necesita algo más tras consultar la orden? --------
   if (session.step === STEPS.ASK_ANYTHING_ELSE) {
     if (isAffirmative(text)) {
@@ -303,6 +619,10 @@ async function handleMessage(phone, text) {
       replies.push('Claro, cuéntame. ¿Qué tipo de novedad presentas?');
       session.novedadCategory = null;
       session.novedadDetalle = null;
+      session.novPendingOrder = null;
+      session.novDeviceScope = null;
+      session.novAlreadyRebooted = false;
+      session.novRebootAt = null;
       session.step = STEPS.ASK_REQUIREMENT;
       return replies;
     }

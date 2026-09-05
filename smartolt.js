@@ -186,9 +186,44 @@ function formatLastStatusChange(rawDate) {
   });
 }
 
+/**
+ * Envía el comando de reinicio remoto a la ONU de un abonado.
+ * @param {string} abonado
+ * @returns {Promise<boolean>} true si SmartOLT confirmó que el comando fue enviado
+ */
+async function rebootOnu(abonado) {
+  const city = getCityFromAbonado(abonado);
+  if (!city) {
+    console.warn(`⚠️  Prefijo de abonado no reconocido para reinicio SmartOLT: ${abonado}`);
+    return false;
+  }
+
+  const { baseUrl, apiKeys } = getCityConfig(city);
+  if (!baseUrl || apiKeys.length === 0) return false;
+
+  const entries = await getCityOnuList(city);
+  const match = findOnuInList(entries, abonado);
+  if (!match) return false;
+
+  try {
+    const response = await axios.post(
+      `${baseUrl}/api/onu/reboot/${encodeURIComponent(match.externalId)}`,
+      {},
+      { headers: { 'X-Token': match.apiKey }, validateStatus: (s) => s === 200 || s === 400 }
+    );
+    const success = response.status === 200 && response.data?.status === true;
+    console.log(`🔄 Reinicio ONU (${abonado}): ${success ? 'comando enviado' : 'falló'} — respuesta: ${JSON.stringify(response.data)}`);
+    return success;
+  } catch (err) {
+    console.warn(`⚠️  Error reiniciando ONU en SmartOLT:`, err.message);
+    return false;
+  }
+}
+
 module.exports = {
   getOnuSignal,
   translateStatus,
   translateSignal,
   formatLastStatusChange,
+  rebootOnu,
 };
