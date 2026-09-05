@@ -376,7 +376,11 @@ async function handleMessage(phone, text) {
         // Caso 2: sin señal (offline / LOS / power fail)
         if (status !== 'online') {
           replies.push(
-            'Vamos a hacer unas validaciones rápidas: 1️⃣ Verifica que el módem esté conectado a la corriente y que sus luces LED estén encendidas. 2️⃣ Revisa la fibra de color negro que entra a tu hogar y llega hasta una cajita blanca. 3️⃣ Revisa el patch cord amarillo que sale de esa caja y va hasta el módem por debajo. Cuéntame, ¿de qué color están los LED del módem?'
+            'Vamos a hacer unas validaciones rápidas:\n\n' +
+            '1️⃣ Verifica que el módem esté conectado a la corriente y que sus luces LED estén encendidas.\n' +
+            '2️⃣ Revisa la fibra de color negro que entra a tu hogar y llega hasta una cajita blanca.\n' +
+            '3️⃣ Revisa el patch cord amarillo que sale de esa caja y va hasta el módem por debajo.\n\n' +
+            'Cuéntame, ¿de qué color están los LED del módem?'
           );
           session.step = STEPS.NOV_ASK_LED_COLOR;
           return replies;
@@ -384,7 +388,9 @@ async function handleMessage(phone, text) {
 
         // Caso 3: señal "very good", sin alertas
         replies.push(
-          'Para orientar mejor el diagnóstico, cuéntame: ¿el problema se presenta 1️⃣ en todos tus dispositivos o 2️⃣ solo en uno?'
+          'Para orientar mejor el diagnóstico, cuéntame: ¿el problema se presenta...\n\n' +
+          '1️⃣ En todos tus dispositivos\n' +
+          '2️⃣ Solo en uno'
         );
         session.step = STEPS.NOV_ASK_DEVICE_SCOPE;
         return replies;
@@ -542,12 +548,20 @@ async function handleMessage(phone, text) {
     const scope = classifyDeviceScope(text);
 
     if (!scope) {
-      replies.push('¿Podrías indicarme con el número, por favor? 1️⃣ Todos los dispositivos, 2️⃣ Solo uno.');
+      replies.push(
+        '¿Podrías indicarme con el número, por favor?\n\n' +
+        '1️⃣ Todos los dispositivos\n' +
+        '2️⃣ Solo uno'
+      );
       return replies;
     }
 
     session.novDeviceScope = scope;
-    replies.push('Entendido. ¿Y esto ocurre 1️⃣ todo el tiempo o 2️⃣ solo en un horario específico (por ejemplo, en la noche)?');
+    replies.push(
+      'Entendido. ¿Y esto ocurre...\n\n' +
+      '1️⃣ Todo el tiempo\n' +
+      '2️⃣ Solo en un horario específico (por ejemplo, en la noche)'
+    );
     session.step = STEPS.NOV_ASK_TIME_PATTERN;
     return replies;
   }
@@ -557,7 +571,11 @@ async function handleMessage(phone, text) {
     const pattern = classifyTimePattern(text);
 
     if (!pattern) {
-      replies.push('¿Podrías indicarme con el número, por favor? 1️⃣ Todo el tiempo, 2️⃣ Solo en un horario específico.');
+      replies.push(
+        '¿Podrías indicarme con el número, por favor?\n\n' +
+        '1️⃣ Todo el tiempo\n' +
+        '2️⃣ Solo en un horario específico'
+      );
       return replies;
     }
 
@@ -583,7 +601,11 @@ async function handleMessage(phone, text) {
 
     // scope === 'uno'
     replies.push(
-      'Vamos a hacer unas validaciones: 1️⃣ Conéctate a la red de 5GHz si tu módem la tiene. 2️⃣ Realiza una prueba de velocidad cerca del módem. 3️⃣ Haz una prueba de navegación o reproducción de un video. Cuéntame cómo te fue: ¿mejoró o sigue igual?'
+      'Vamos a hacer unas validaciones:\n\n' +
+      '1️⃣ Conéctate a la red de 5GHz si tu módem la tiene.\n' +
+      '2️⃣ Realiza una prueba de velocidad cerca del módem.\n' +
+      '3️⃣ Haz una prueba de navegación o reproducción de un video.\n\n' +
+      'Cuéntame cómo te fue: ¿mejoró o sigue igual?'
     );
     session.step = STEPS.NOV_ASK_SINGLE_DEVICE_RESULT;
     return replies;
