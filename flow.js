@@ -367,13 +367,13 @@ async function handleMessage(phone, text) {
         return replies;
       }
 
-      if (session.novedadCategory === 'novedadconservicio') {
-        if (session.novedadDetalle === 'problemas con aplicaciones o páginas web') {
-          replies.push('Cuéntame, ¿qué página web o aplicación te está presentando la novedad?');
-          session.step = STEPS.NOV_APP_ASK_NAME;
-          return replies;
-        }
+      if (session.novedadCategory === 'aplicaciones') {
+        replies.push('Cuéntame, ¿qué página web o aplicación te está presentando la novedad?');
+        session.step = STEPS.NOV_APP_ASK_NAME;
+        return replies;
+      }
 
+      if (session.novedadCategory === 'novedadconservicio') {
         const onu = await getOnuSignal(session.customer.abonado);
 
         if (!onu) {

@@ -1,7 +1,7 @@
 // novedad.js
 //
 // Clasifica, de forma conversacional, qué tipo de novedad presenta
-// el cliente entre las 4 categorías definidas. No usa un menú rígido:
+// el cliente entre las 5 categorías definidas. No usa un menú rígido:
 // intenta reconocer la intención por palabras clave en lo que el
 // cliente escriba con sus propias palabras.
 
@@ -71,17 +71,24 @@ const CATEGORY_KEYWORDS = {
     'lento',
     'lenta',
     'lentitud',
-    'no carga',
-    'no abre',
     'velocidad',
     'test de velocidad',
     'megas',
-    'netflix',
-    'whatsapp',
-    'pagina',
-    'página',
+  ],
+  aplicaciones: [
+    'no carga',
+    'no abre',
     'aplicacion',
     'aplicación',
+    'app ',
+    'pagina',
+    'página',
+    'netflix',
+    'whatsapp',
+    'instagram',
+    'facebook',
+    'youtube',
+    'tiktok',
   ],
 };
 
@@ -90,16 +97,17 @@ const NUMBER_TO_CATEGORY = {
   2: 'novedadconservicio',
   3: 'sinservicio',
   4: 'tv',
+  5: 'aplicaciones',
 };
 
 /**
- * Intenta clasificar el texto libre del cliente en una de las 4
+ * Intenta clasificar el texto libre del cliente en una de las 5
  * categorías. Devuelve null si no logra identificarla con confianza.
  */
 function classify(text) {
   const t = normalize(text);
 
-  const numberMatch = t.match(/^[1-4]$/);
+  const numberMatch = t.match(/^[1-5]$/);
   if (numberMatch) return NUMBER_TO_CATEGORY[Number(numberMatch[0])];
 
   // Orden y TV se revisan primero porque usan palabras más específicas
@@ -107,6 +115,7 @@ function classify(text) {
   if (matchesAny(t, CATEGORY_KEYWORDS.orden)) return 'orden';
   if (matchesAny(t, CATEGORY_KEYWORDS.tv)) return 'tv';
   if (matchesAny(t, CATEGORY_KEYWORDS.sinservicio)) return 'sinservicio';
+  if (matchesAny(t, CATEGORY_KEYWORDS.aplicaciones)) return 'aplicaciones';
   if (matchesAny(t, CATEGORY_KEYWORDS.novedadconservicio)) return 'novedadconservicio';
 
   return null;
@@ -126,11 +135,6 @@ function classifySubIssue(text) {
   if (matchesAny(t, ['lento', 'lenta', 'lentitud'])) {
     return 'lentitud en tu conexión';
   }
-  if (
-    matchesAny(t, ['no carga', 'no abre', 'no funciona', 'netflix', 'whatsapp', 'pagina', 'página', 'aplicacion', 'aplicación'])
-  ) {
-    return 'problemas con aplicaciones o páginas web';
-  }
   if (matchesAny(t, ['velocidad', 'test de velocidad', 'megas', 'contratada'])) {
     return 'la velocidad contratada, que no corresponde con los resultados de tus pruebas de velocidad';
   }
@@ -147,6 +151,8 @@ function buildConfirmationMessage(category, detalle) {
       return 'Entiendo: actualmente no cuentas con servicio de internet, ni por cable ni por wifi.';
     case 'tv':
       return 'Entiendo: tienes novedades con el servicio de televisión.';
+    case 'aplicaciones':
+      return 'Entiendo: tienes una novedad con una página web o aplicación específica.';
     default:
       return null;
   }
@@ -155,9 +161,10 @@ function buildConfirmationMessage(category, detalle) {
 const CLARIFYING_MESSAGE =
   'Cuéntame un poco más para orientarte bien 🙂 ¿Tu caso se trata de...\n\n' +
   '1️⃣ Saber cuándo te visitan por una orden de mantenimiento\n' +
-  '2️⃣ Tu servicio está activo, pero con fallas (lento, se corta, no cargan bien tus apps o páginas)\n' +
+  '2️⃣ Tu servicio está activo, pero con fallas (lento, se corta)\n' +
   '3️⃣ No tienes internet en absoluto (luces en rojo, fibra rota, equipo dañado)\n' +
-  '4️⃣ Problemas con el servicio de televisión\n\n' +
+  '4️⃣ Problemas con el servicio de televisión\n' +
+  '5️⃣ Problemas con una página web o aplicación específica (no carga, no abre)\n\n' +
   'Puedes responderme con el número, o contarme con tus propias palabras. 🙂';
 
 module.exports = {
