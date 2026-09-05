@@ -24,6 +24,7 @@ const {
   buildConfirmationMessage,
   CLARIFYING_MESSAGE,
 } = require('./novedad');
+const { checkOrdenStatus } = require('./ordenes');
 
 // sessions: Map<numeroDeWhatsapp, sessionObject>
 const sessions = new Map();
@@ -245,6 +246,18 @@ async function handleMessage(phone, text) {
   // -------- Paso: confirmar la novedad identificada --------
   if (session.step === STEPS.CONFIRM_NOVEDAD) {
     if (isAffirmative(text)) {
+      if (session.novedadCategory === 'orden') {
+        try {
+          const ordenReplies = await checkOrdenStatus(session.customer.abonado);
+          replies.push(...ordenReplies);
+        } catch (err) {
+          console.error('Error consultando órdenes:', err.message);
+          replies.push('No pude consultar el estado de tu orden en este momento. Te voy a comunicar con un asesor. 🙌');
+        }
+        resetSession(phone);
+        return replies;
+      }
+
       replies.push(
         'Perfecto, dame un momento mientras continúo con tu solicitud. 🙌 ' +
         `(Aquí conecta el Flujo 4, según la categoría: ${session.novedadCategory}.)`
