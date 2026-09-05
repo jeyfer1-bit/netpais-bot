@@ -12,6 +12,11 @@
 // actual esto es suficiente.
 
 const { findCustomer } = require('./customerLookup');
+const {
+  getOnuSignal,
+  translateStatus,
+  translateSignal,
+} = require('./smartolt');
 
 // sessions: Map<numeroDeWhatsapp, sessionObject>
 const sessions = new Map();
@@ -167,7 +172,22 @@ async function handleMessage(phone, text) {
 
     if (estado === 'activo') {
       replies.push(`Tu servicio está: *${customer.estado}* ✅`);
-      replies.push('¿Qué tipo de requerimiento necesitas hoy?');
+
+      // -------- Flujo 2: Validar abonado SmartOLT --------
+      const onu = await getOnuSignal(customer.abonado);
+      if (onu) {
+        replies.push(
+          `Su servicio fue validado y actualmente su estado de conexión es ${translateStatus(onu.status)}, ` +
+          `el estado de su señal es ${translateSignal(onu.signal)} ` +
+          `y el último cambio de estado de su conexión fue ${onu.lastStatusChange}.`
+        );
+      } else {
+        replies.push(
+          'No pude validar automáticamente el estado de tu conexión en este momento, pero seguimos con tu solicitud.'
+        );
+      }
+
+      replies.push('¿Qué tipo de novedad presentas?');
       session.step = STEPS.ASK_REQUIREMENT;
       return replies;
     }
