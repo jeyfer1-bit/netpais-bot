@@ -17,10 +17,18 @@ const axios = require('axios');
 
 const OPEN_STATES = ['CREADA', 'IMPRESA'];
 
-/**
- * Llama al flujo de Power Automate y devuelve { ordenes, tipificacion }.
- */
-async function fetchOrdenesYTipificacion(abonado) {
+// Si el flujo de Power Automate devuelve "ordenes" vacío, reintentamos
+// una vez antes de asumir que el cliente de verdad no tiene órdenes.
+// Esto protege contra fallas intermitentes del conector de Excel Online
+// (índice de tabla no refrescado, co-authoring lock, etc.).
+const MAX_ATTEMPTS = 2;
+const EMPTY_RESULT_RETRY_DELAY_MS = 1200;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function callFlow(abonado) {
   const flowUrl = process.env.POWER_AUTOMATE_ORDENES_URL;
   if (!flowUrl) {
     throw new Error('Falta la variable de entorno POWER_AUTOMATE_ORDENES_URL');
@@ -32,12 +40,41 @@ async function fetchOrdenesYTipificacion(abonado) {
     { headers: { 'Content-Type': 'application/json' } }
   );
 
-  const ordenes = response.data?.ordenes || [];
-  const tipificacion = response.data?.tipificacion || [];
+  return response.data;
+}
 
-  console.log(
-    `📋 Consulta de órdenes para ${abonado}: ${ordenes.length} orden(es), ${tipificacion.length} fila(s) de tipificación`
-  );
+/**
+ * Llama al flujo de Power Automate y devuelve { ordenes, tipificacion }.
+ * Reintenta si la primera respuesta viene con "ordenes" vacío, y siempre
+ * loguea la respuesta cruda (recortada) para poder diagnosticar en Railway
+ * si vuelve a pasar una inconsistencia como la del 2026-09-05.
+ */
+async function fetchOrdenesYTipificacion(abonado) {
+  let data = {};
+  let ordenes = [];
+  let tipificacion = [];
+
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    data = await callFlow(abonado);
+    ordenes = data?.ordenes || [];
+    tipificacion = data?.tipificacion || [];
+
+    console.log(
+      `📋 [intento ${attempt}/${MAX_ATTEMPTS}] Consulta de órdenes para ${abonado}: ` +
+      `${ordenes.length} orden(es), ${tipificacion.length} fila(s) de tipificación. ` +
+      `Respuesta cruda: ${JSON.stringify(data).slice(0, 1000)}`
+    );
+
+    if (ordenes.length > 0 || attempt === MAX_ATTEMPTS) {
+      break;
+    }
+
+    console.warn(
+      `⚠️ Órdenes vacías en el intento ${attempt} para ${abonado}; ` +
+      `reintentando en ${EMPTY_RESULT_RETRY_DELAY_MS}ms por si fue una falla intermitente del conector.`
+    );
+    await sleep(EMPTY_RESULT_RETRY_DELAY_MS);
+  }
 
   return { ordenes, tipificacion };
 }
