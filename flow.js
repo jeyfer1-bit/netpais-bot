@@ -34,6 +34,7 @@ const STEPS = {
   ASK_ID: 'ASK_ID',
   ASK_REQUIREMENT: 'ASK_REQUIREMENT', // Flujo 3: identificar la novedad
   CONFIRM_NOVEDAD: 'CONFIRM_NOVEDAD', // Flujo 3: confirmar antes de pasar al Flujo 4
+  ASK_ANYTHING_ELSE: 'ASK_ANYTHING_ELSE', // Tras consultar la orden: ¿algo más o cerramos?
 };
 
 const MAX_ID_ATTEMPTS = 3;
@@ -267,8 +268,11 @@ async function handleMessage(phone, text) {
         } catch (err) {
           console.error('Error consultando órdenes:', err.message);
           replies.push('No pude consultar el estado de tu orden en este momento. Te voy a comunicar con un asesor. 🙌');
+          resetSession(phone);
+          return replies;
         }
-        resetSession(phone);
+        replies.push('¿Hay algo más en lo que pueda ayudarte? (sí/no)');
+        session.step = STEPS.ASK_ANYTHING_ELSE;
         return replies;
       }
 
@@ -288,6 +292,30 @@ async function handleMessage(phone, text) {
     }
 
     replies.push('¿Podrías confirmarme con un *sí* o un *no*, por favor? 🙂');
+    return replies;
+  }
+
+  // -------- Paso: ¿necesita algo más tras consultar la orden? --------
+  if (session.step === STEPS.ASK_ANYTHING_ELSE) {
+    if (isAffirmative(text)) {
+      // Vuelve directo a pedir la novedad, sin repetir la identificación
+      // del cliente ni ninguna otra validación: session.customer ya está guardado.
+      replies.push('Claro, cuéntame. ¿Qué tipo de novedad presentas?');
+      session.novedadCategory = null;
+      session.novedadDetalle = null;
+      session.step = STEPS.ASK_REQUIREMENT;
+      return replies;
+    }
+
+    if (isNegative(text)) {
+      replies.push(
+        'Perfecto, procedo a cerrar el chat. Gracias por contactarte con netpaís 🙌 Si necesitas algo más, escríbenos de nuevo cuando quieras. 👋'
+      );
+      resetSession(phone); // solo deja la sesión lista para una nueva interacción; no la inicia
+      return replies;
+    }
+
+    replies.push('¿Podrías confirmarme con un *sí* o un *no*? ¿Hay algo más en lo que pueda ayudarte?');
     return replies;
   }
 
