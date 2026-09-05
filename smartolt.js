@@ -17,7 +17,7 @@ const PREFIX_TO_CITY = {
   DOR: 'ladorada',
   PTO: 'puertosalgar',
   VDR: 'villadelrosario',
-  LPT: 'lospatios',
+  LP: 'lospatios',
 };
 
 const ONU_LIST_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hora
@@ -28,8 +28,12 @@ const cache = {};
 const refreshing = {};
 
 function getCityFromAbonado(abonado) {
-  const prefix = String(abonado).trim().slice(0, 3).toUpperCase();
-  return PREFIX_TO_CITY[prefix] || null;
+  const clean = String(abonado).trim().toUpperCase();
+  // Los prefijos tienen distinto largo (la mayoría 3 letras, "LP" son 2),
+  // así que probamos del más largo al más corto para no confundirlos.
+  const prefixesByLength = Object.keys(PREFIX_TO_CITY).sort((a, b) => b.length - a.length);
+  const match = prefixesByLength.find((prefix) => clean.startsWith(prefix));
+  return match ? PREFIX_TO_CITY[match] : null;
 }
 
 // Credenciales por ciudad. Algunas ciudades tienen más de un OLT
