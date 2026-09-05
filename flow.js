@@ -201,6 +201,20 @@ async function handleMessage(phone, text) {
       return replies;
     }
 
+    if (estado === 'por instalar') {
+      replies.push(`Tu servicio está: *${customer.estado}* 🛠️`);
+      replies.push('Voy a revisar el estado de tu orden de instalación...');
+      try {
+        const ordenReplies = await checkOrdenStatus(customer.abonado);
+        replies.push(...ordenReplies);
+      } catch (err) {
+        console.error('Error consultando órdenes:', err.message);
+        replies.push('No pude consultar el estado de tu orden en este momento. Te voy a comunicar con un asesor. 🙌');
+      }
+      resetSession(phone);
+      return replies;
+    }
+
     if (estado === 'cortado') {
       replies.push(`Tu servicio está: *${customer.estado}* ⚠️`);
       replies.push(
