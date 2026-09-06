@@ -256,6 +256,88 @@ async function getOnuSpeedProfiles(abonado) {
   }
 }
 
+/**
+ * Consulta el estado del puerto de TV (CATV) de la ONU de un abonado.
+ * Confirmado con la documentación completa de SmartOLT: el campo es
+ * "catv_status", con valores "Enabled" / "Disabled" / "CATV not
+ * supported by ONU-Type".
+ *
+ * @param {string} abonado
+ * @returns {Promise<'enabled'|'disabled'|'unsupported'|null>}
+ */
+async function getOnuCatvStatus(abonado) {
+  const city = getCityFromAbonado(abonado);
+  if (!city) return null;
+
+  const { baseUrl, apiKeys } = getCityConfig(city);
+  if (!baseUrl || apiKeys.length === 0) return null;
+
+  const entries = await getCityOnuList(city);
+  const match = findOnuInList(entries, abonado);
+  if (!match) return null;
+
+  try {
+    const response = await axios.get(`${baseUrl}/api/onu/get_onus_catv_statuses`, {
+      headers: { 'X-Token': match.apiKey },
+      validateStatus: (s) => s === 200 || s === 400,
+    });
+
+    if (response.status !== 200 || !response.data?.status) return null;
+
+    const list = response.data.response || [];
+    const entry = list.find((e) => e.unique_external_id === match.externalId);
+
+    if (!entry) {
+      console.warn(`⚠️  No se encontró el ONU ${match.externalId} dentro de get_onus_catv_statuses`);
+      return null;
+    }
+
+    console.log(`📺 CATV status crudo (${abonado}):`, JSON.stringify(entry));
+
+    const raw = String(entry.catv_status || '').toLowerCase();
+    if (raw.includes('disab')) return 'disabled';
+    if (raw.includes('not supported')) return 'unsupported';
+    if (raw.includes('enab')) return 'enabled';
+
+    console.warn(`⚠️  Campo catv_status con valor inesperado: "${entry.catv_status}"`);
+    return null;
+  } catch (err) {
+    console.warn(`⚠️  Error consultando estado CATV en SmartOLT:`, err.message);
+    return null;
+  }
+}
+
+/**
+ * Enciende (habilita) el puerto de TV (CATV) de la ONU de un abonado.
+ * @param {string} abonado
+ * @returns {Promise<boolean>}
+ */
+async function enableOnuCatv(abonado) {
+  const city = getCityFromAbonado(abonado);
+  if (!city) return false;
+
+  const { baseUrl, apiKeys } = getCityConfig(city);
+  if (!baseUrl || apiKeys.length === 0) return false;
+
+  const entries = await getCityOnuList(city);
+  const match = findOnuInList(entries, abonado);
+  if (!match) return false;
+
+  try {
+    const response = await axios.post(
+      `${baseUrl}/api/onu/enable_catv/${encodeURIComponent(match.externalId)}`,
+      {},
+      { headers: { 'X-Token': match.apiKey }, validateStatus: (s) => s === 200 || s === 400 }
+    );
+    const success = response.status === 200 && response.data?.status === true;
+    console.log(`📺 Enable CATV (${abonado}): ${success ? 'encendido' : 'falló'} — respuesta: ${JSON.stringify(response.data)}`);
+    return success;
+  } catch (err) {
+    console.warn(`⚠️  Error encendiendo CATV en SmartOLT:`, err.message);
+    return false;
+  }
+}
+
 module.exports = {
   getOnuSignal,
   translateStatus,
@@ -263,4 +345,6 @@ module.exports = {
   formatLastStatusChange,
   rebootOnu,
   getOnuSpeedProfiles,
+  getOnuCatvStatus,
+  enableOnuCatv,
 };
