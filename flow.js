@@ -21,7 +21,10 @@ const {
   getOnuSpeedProfiles,
   getOnuCatvStatus,
   enableOnuCatv,
+  getOnuTrafficGraph,
+  getOnuSignalGraph,
 } = require('./smartolt');
+const { sendImageMessage } = require('./whatsapp');
 const {
   classify,
   classifySubIssue,
@@ -63,6 +66,12 @@ const STEPS = {
   TV_ASK_TV_COUNT: 'TV_ASK_TV_COUNT', // ¿todos los televisores o solo uno?
   TV_ASK_SERVICE_OK: 'TV_ASK_SERVICE_OK', // ¿ya hay señal tras encender el CATV?
   TV_ASK_VALIDATION_RESULT: 'TV_ASK_VALIDATION_RESULT', // resultado tras validaciones físicas
+
+  // Flujo: no tiene servicio de internet
+  SIN_ASK_VALIDATIONS_DONE: 'SIN_ASK_VALIDATIONS_DONE', // ¿ya hizo las validaciones iniciales?
+  SIN_ASK_LED_RED: 'SIN_ASK_LED_RED', // ¿ve algún LED en rojo?
+  SIN_ASK_SERVICE_NOW: 'SIN_ASK_SERVICE_NOW', // sin LED rojo: ¿ya tiene servicio?
+  SIN_ASK_PERSISTS_AFTER_VALIDATIONS: 'SIN_ASK_PERSISTS_AFTER_VALIDATIONS', // el sistema muestra servicio activo: ¿persiste la falla?
 };
 
 const SPEED_TEST_TOLERANCE = 0.9; // -10% de tolerancia sobre el plan contratado
@@ -267,6 +276,23 @@ function classifyTvScope(text) {
   if (t === '1' || /\bcanal(es)?\b/.test(t) || /\balgunos\b/.test(t)) return 'canales';
   if (t === '2' || /\btotal\b/.test(t) || /\bningun/.test(t) || /\bno veo nada\b/.test(t) || /\btodos los canales\b/.test(t)) {
     return 'total';
+  }
+  return null;
+}
+
+// -------- Flujo: no tiene servicio de internet --------
+
+/**
+ * Distingue si el cliente ya hizo las validaciones iniciales, o si no
+ * puede hacerlas en este momento (ej: no está en el hogar).
+ */
+function classifyValidationConfirm(text) {
+  const t = normalize(text);
+  if (/\bno puedo\b|\bno estoy\b|\bno tengo\b|\bmas tarde\b|\bdespues\b|\bluego\b|\bahora no\b|\bno se puede\b/.test(t)) {
+    return 'no_puede';
+  }
+  if (isAffirmative(text) || /\blisto\b|\bya\b|\bhecho\b|\brevisad[oa]\b|\bconfirmad[oa]\b|\basegurad[oa]\b/.test(t)) {
+    return 'confirmado';
   }
   return null;
 }
@@ -536,6 +562,59 @@ async function handleMessage(phone, text) {
         return replies;
       }
 
+      if (session.novedadCategory === 'sinservicio') {
+        const onu = await getOnuSignal(session.customer.abonado);
+
+        if (!onu) {
+          replies.push('No pude validar automáticamente el estado de tu conexión en este momento. Te voy a comunicar con un asesor. 🙌');
+          resetSession(phone);
+          return replies;
+        }
+
+        const status = String(onu.status).toLowerCase();
+
+        if (status !== 'online') {
+          replies.push(
+            'Confirmo que actualmente no tienes servicio de internet. Antes de continuar, realicemos estas validaciones:\n\n' +
+            '1️⃣ Verifica que el módem esté conectado a la corriente y que sus luces LED estén encendidas.\n' +
+            '2️⃣ Revisa que la fibra de color negro que entra a tu hogar hasta la cajita blanca, y el patch cord verde que va de la cajita al módem, estén bien conectados.\n' +
+            '3️⃣ Asegúrate de estar conectado a la red WiFi del módem, o por cable ethernet directo.\n\n' +
+            '¿Ya realizaste estas validaciones? (sí/no)'
+          );
+          session.step = STEPS.SIN_ASK_VALIDATIONS_DONE;
+          return replies;
+        }
+
+        // status === 'online': nuestro sistema muestra que sí tiene servicio
+        replies.push(
+          'Vemos tu equipo actualmente conectado y con servicio. Te comparto las gráficas de tráfico y señal de tu conexión del último día, para que las veas también. 📊'
+        );
+
+        try {
+          const trafficGraph = await getOnuTrafficGraph(session.customer.abonado, 'daily');
+          if (trafficGraph) {
+            await sendImageMessage(phone, trafficGraph, 'Tráfico de tu conexión — último día');
+          }
+          const signalGraph = await getOnuSignalGraph(session.customer.abonado, 'daily');
+          if (signalGraph) {
+            await sendImageMessage(phone, signalGraph, 'Señal de tu conexión — último día');
+          }
+        } catch (err) {
+          console.error('Error enviando gráficas de SmartOLT:', err.message);
+        }
+
+        replies.push(
+          'Con esto de nuestro lado, por favor realiza estas validaciones:\n\n' +
+          '1️⃣ Asegúrate de estar conectado a la red WiFi de tu hogar.\n' +
+          '2️⃣ Si tienes la opción, haz una prueba de navegación conectando un computador por cable al módem.\n' +
+          '3️⃣ Intenta cambiar entre la red de 2.4GHz y 5GHz.\n' +
+          '4️⃣ Intenta con otro dispositivo.\n\n' +
+          '¿La falla persiste después de estas validaciones? (sí/no)'
+        );
+        session.step = STEPS.SIN_ASK_PERSISTS_AFTER_VALIDATIONS;
+        return replies;
+      }
+
       replies.push(
         'Perfecto, dame un momento mientras continúo con tu solicitud. 🙌 ' +
         `(Aquí conecta el Flujo 4, según la categoría: ${session.novedadCategory}.)`
@@ -771,6 +850,100 @@ async function handleMessage(phone, text) {
     }
 
     replies.push('Cuéntame, ¿mejoró la conexión en ese dispositivo o sigue igual?');
+    return replies;
+  }
+
+  // -------- Flujo sin servicio: ¿ya hizo las validaciones iniciales? --------
+  if (session.step === STEPS.SIN_ASK_VALIDATIONS_DONE) {
+    const result = classifyValidationConfirm(text);
+
+    if (result === 'no_puede') {
+      replies.push('Sin problema. Vuelve a escribirnos cuando estés en el hogar y puedas hacer estas validaciones, para darte un mejor soporte. 🙌');
+      replies.push('¿Hay algo más en lo que pueda ayudarte? (sí/no)');
+      session.step = STEPS.ASK_ANYTHING_ELSE;
+      return replies;
+    }
+
+    if (result === 'confirmado') {
+      replies.push('Perfecto. ¿Ves algún LED en rojo en el módem? (sí/no)');
+      session.step = STEPS.SIN_ASK_LED_RED;
+      return replies;
+    }
+
+    replies.push('¿Ya pudiste realizar esas validaciones? Cuéntame con un *sí* o un *no*.');
+    return replies;
+  }
+
+  // -------- Flujo sin servicio: ¿algún LED en rojo? --------
+  if (session.step === STEPS.SIN_ASK_LED_RED) {
+    if (isAffirmative(text)) {
+      const onu = await getOnuSignal(session.customer.abonado);
+      const stillDown = !onu || String(onu.status).toLowerCase() !== 'online';
+
+      if (stillDown) {
+        replies.push(await buildCrearOrdenMessage(session.customer.abonado, 'SIN SERVICIO CORTE DE FIBRA ÓPTICA'));
+      } else {
+        replies.push(
+          'Vemos tu equipo actualmente conectado con normalidad, por lo que la falla podría deberse a un tema de configuración avanzada del módem.'
+        );
+        replies.push(await buildCrearOrdenMessage(session.customer.abonado, 'SIN SERVICIO CONFIGURACIÓN ONT'));
+      }
+
+      replies.push('¿Hay algo más en lo que pueda ayudarte? (sí/no)');
+      session.step = STEPS.ASK_ANYTHING_ELSE;
+      return replies;
+    }
+
+    if (isNegative(text)) {
+      replies.push('Entiendo. ¿Ya cuentas con servicio de internet? (sí/no)');
+      session.step = STEPS.SIN_ASK_SERVICE_NOW;
+      return replies;
+    }
+
+    replies.push('¿Podrías confirmarme con un *sí* o un *no*? ¿Ves algún LED en rojo en el módem?');
+    return replies;
+  }
+
+  // -------- Flujo sin servicio: sin LED rojo, ¿ya tiene servicio? --------
+  if (session.step === STEPS.SIN_ASK_SERVICE_NOW) {
+    if (isAffirmative(text)) {
+      replies.push('¡Qué bueno! Me alegra que ya tengas servicio. 🙌');
+      replies.push('¿Hay algo más en lo que pueda ayudarte? (sí/no)');
+      session.step = STEPS.ASK_ANYTHING_ELSE;
+      return replies;
+    }
+
+    if (isNegative(text)) {
+      replies.push(
+        'Vemos tu equipo actualmente conectado con normalidad, por lo que la falla podría deberse a un tema de configuración avanzada del módem.'
+      );
+      replies.push(await buildCrearOrdenMessage(session.customer.abonado, 'SIN SERVICIO CONFIGURACIÓN ONT'));
+      replies.push('¿Hay algo más en lo que pueda ayudarte? (sí/no)');
+      session.step = STEPS.ASK_ANYTHING_ELSE;
+      return replies;
+    }
+
+    replies.push('¿Podrías confirmarme con un *sí* o un *no*? ¿Ya cuentas con servicio de internet?');
+    return replies;
+  }
+
+  // -------- Flujo sin servicio: el sistema muestra servicio activo, ¿persiste la falla? --------
+  if (session.step === STEPS.SIN_ASK_PERSISTS_AFTER_VALIDATIONS) {
+    if (isNegative(text)) {
+      replies.push('¡Qué bueno! Me alegra que ya tengas servicio. 🙌');
+      replies.push('¿Hay algo más en lo que pueda ayudarte? (sí/no)');
+      session.step = STEPS.ASK_ANYTHING_ELSE;
+      return replies;
+    }
+
+    if (isAffirmative(text)) {
+      replies.push(await buildCrearOrdenMessage(session.customer.abonado, 'INTERMITENCIA/LENTITUD INTERNET'));
+      replies.push('¿Hay algo más en lo que pueda ayudarte? (sí/no)');
+      session.step = STEPS.ASK_ANYTHING_ELSE;
+      return replies;
+    }
+
+    replies.push('¿Podrías confirmarme con un *sí* o un *no*? ¿La falla persiste?');
     return replies;
   }
 

@@ -338,6 +338,55 @@ async function enableOnuCatv(abonado) {
   }
 }
 
+async function fetchOnuGraph(abonado, path, graphType) {
+  const city = getCityFromAbonado(abonado);
+  if (!city) return null;
+
+  const { baseUrl, apiKeys } = getCityConfig(city);
+  if (!baseUrl || apiKeys.length === 0) return null;
+
+  const entries = await getCityOnuList(city);
+  const match = findOnuInList(entries, abonado);
+  if (!match) return null;
+
+  try {
+    const response = await axios.get(
+      `${baseUrl}${path}/${encodeURIComponent(match.externalId)}/${graphType}`,
+      {
+        headers: { 'X-Token': match.apiKey },
+        responseType: 'arraybuffer',
+        validateStatus: (s) => s === 200 || s === 400,
+      }
+    );
+
+    if (response.status !== 200) return null; // sin gráfico disponible aún, o ID no encontrado
+    return Buffer.from(response.data);
+  } catch (err) {
+    console.warn(`⚠️  Error trayendo gráfico de SmartOLT (${path}):`, err.message);
+    return null;
+  }
+}
+
+/**
+ * Trae el gráfico de tráfico (PNG) de la ONU de un abonado.
+ * @param {string} abonado
+ * @param {'hourly'|'daily'|'weekly'|'monthly'|'yearly'} graphType
+ * @returns {Promise<Buffer|null>}
+ */
+async function getOnuTrafficGraph(abonado, graphType = 'daily') {
+  return fetchOnuGraph(abonado, '/api/onu/get_onu_traffic_graph', graphType);
+}
+
+/**
+ * Trae el gráfico de señal (PNG) de la ONU de un abonado.
+ * @param {string} abonado
+ * @param {'hourly'|'daily'|'weekly'|'monthly'|'yearly'} graphType
+ * @returns {Promise<Buffer|null>}
+ */
+async function getOnuSignalGraph(abonado, graphType = 'daily') {
+  return fetchOnuGraph(abonado, '/api/onu/get_onu_signal_graph', graphType);
+}
+
 module.exports = {
   getOnuSignal,
   translateStatus,
@@ -347,4 +396,6 @@ module.exports = {
   getOnuSpeedProfiles,
   getOnuCatvStatus,
   enableOnuCatv,
+  getOnuTrafficGraph,
+  getOnuSignalGraph,
 };

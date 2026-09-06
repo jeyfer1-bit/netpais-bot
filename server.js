@@ -2,21 +2,16 @@
 // Bot de WhatsApp usando la Cloud API oficial de Meta.
 require('dotenv').config();
 const express = require('express');
-const axios = require('axios');
 const { handleMessage } = require('./flow');
+const { sendTextMessage } = require('./whatsapp');
 
 const app = express();
 app.use(express.json());
 
 const {
   VERIFY_TOKEN,       // el mismo valor que vas a poner en el panel de Meta
-  WHATSAPP_TOKEN,     // token de acceso (temporal o permanente)
-  PHONE_NUMBER_ID,    // el que copiaste del panel: 1359415357249667
   PORT = 3000,
 } = process.env;
-
-const GRAPH_API_VERSION = 'v21.0';
-const GRAPH_URL = `https://graph.facebook.com/${GRAPH_API_VERSION}/${PHONE_NUMBER_ID}/messages`;
 
 // ---------------------------------------------------------------
 // 1) Verificación del webhook (Meta llama a este endpoint con GET
@@ -76,27 +71,6 @@ app.post('/webhook', async (req, res) => {
     console.error('Error procesando el mensaje entrante:', err?.response?.data || err.message);
   }
 });
-
-// ---------------------------------------------------------------
-// Función para enviar un mensaje de texto vía la Cloud API
-// ---------------------------------------------------------------
-async function sendTextMessage(to, body) {
-  await axios.post(
-    GRAPH_URL,
-    {
-      messaging_product: 'whatsapp',
-      to,
-      type: 'text',
-      text: { body },
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-        'Content-Type': 'application/json',
-      },
-    }
-  );
-}
 
 // ---------------------------------------------------------------
 app.get('/', (_req, res) => {
