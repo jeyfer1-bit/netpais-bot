@@ -19,6 +19,8 @@ const {
   formatLastStatusChange,
   rebootOnu,
   getOnuSpeedProfiles,
+  getOnuCatvStatus,
+  enableOnuCatv,
 } = require('./smartolt');
 const {
   classify,
@@ -54,6 +56,13 @@ const STEPS = {
   // Flujo: velocidad contratada vs. test de velocidad
   NOV_SPEED_ASK_METHOD: 'NOV_SPEED_ASK_METHOD', // ¿test por cable o por wifi?
   NOV_SPEED_ASK_RESULT: 'NOV_SPEED_ASK_RESULT', // esperando el resultado del test
+
+  // Flujo: revisión de televisión
+  TV_ASK_SCOPE: 'TV_ASK_SCOPE', // ¿uno/algunos canales o falla total?
+  TV_ASK_TIME_PATTERN: 'TV_ASK_TIME_PATTERN', // ¿todo el tiempo o franja horaria?
+  TV_ASK_TV_COUNT: 'TV_ASK_TV_COUNT', // ¿todos los televisores o solo uno?
+  TV_ASK_SERVICE_OK: 'TV_ASK_SERVICE_OK', // ¿ya hay señal tras encender el CATV?
+  TV_ASK_VALIDATION_RESULT: 'TV_ASK_VALIDATION_RESULT', // resultado tras validaciones físicas
 };
 
 const SPEED_TEST_TOLERANCE = 0.9; // -10% de tolerancia sobre el plan contratado
@@ -239,6 +248,17 @@ function classifySpeedTestResult(text, planMbps) {
   if (/\bbien\b|\bnormal\b|\bcorrecto\b|\bok\b/.test(t)) return 'positivo';
   if (/\bmal\b|\bmalo\b|\bincorrecto\b|\bbajo\b|\bpoco\b/.test(t)) return 'negativo';
 
+  return null;
+}
+
+// -------- Flujo: revisión de televisión --------
+
+function classifyTvScope(text) {
+  const t = normalize(text);
+  if (t === '1' || /\bcanal(es)?\b/.test(t) || /\balgunos\b/.test(t)) return 'canales';
+  if (t === '2' || /\btotal\b/.test(t) || /\bningun/.test(t) || /\bno veo nada\b/.test(t) || /\btodos los canales\b/.test(t)) {
+    return 'total';
+  }
   return null;
 }
 
@@ -497,6 +517,16 @@ async function handleMessage(phone, text) {
         return replies;
       }
 
+      if (session.novedadCategory === 'tv') {
+        replies.push(
+          '¿La falla es en uno o algunos canales, o es una falla total del servicio de televisión (no ves ningún canal)?\n\n' +
+          '1️⃣ Uno o algunos canales\n' +
+          '2️⃣ Falla total (no hay señal en ningún canal)'
+        );
+        session.step = STEPS.TV_ASK_SCOPE;
+        return replies;
+      }
+
       replies.push(
         'Perfecto, dame un momento mientras continúo con tu solicitud. 🙌 ' +
         `(Aquí conecta el Flujo 4, según la categoría: ${session.novedadCategory}.)`
@@ -735,6 +765,191 @@ async function handleMessage(phone, text) {
     return replies;
   }
 
+  // -------- Flujo TV: ¿canales específicos o falla total? --------
+  if (session.step === STEPS.TV_ASK_SCOPE) {
+    const scope = classifyTvScope(text);
+
+    if (!scope) {
+      replies.push('¿Podrías confirmarme con el número? 1️⃣ Uno o algunos canales, 2️⃣ Falla total.');
+      return replies;
+    }
+
+    if (scope === 'canales') {
+      replies.push(
+        'La mayoría de estas fallas se deben a la transmisión de origen de las casas programadoras, o a interferencias satelitales. Lo bueno es que suelen ser temporales y se resuelven en minutos.\n\n' +
+        'Para darte un mejor diagnóstico, cuéntame: ¿la falla ocurre...\n\n' +
+        '1️⃣ Todo el tiempo\n' +
+        '2️⃣ Solo en un horario específico'
+      );
+      session.step = STEPS.TV_ASK_TIME_PATTERN;
+      return replies;
+    }
+
+    // scope === 'total'
+    const catvStatus = await getOnuCatvStatus(session.customer.abonado);
+
+    if (!catvStatus) {
+      replies.push('No pude validar automáticamente el estado del servicio de televisión en este momento. Te voy a comunicar con un asesor. 🙌');
+      resetSession(phone);
+      return replies;
+    }
+
+    if (catvStatus === 'unsupported') {
+      replies.push('El equipo asociado a tu servicio no es compatible con TV por este medio. Te voy a comunicar con un asesor para revisar tu caso. 🙌');
+      resetSession(phone);
+      return replies;
+    }
+
+    if (catvStatus === 'disabled') {
+      replies.push('Veo que el puerto de televisión está apagado en tu módem. Voy a proceder a encenderlo. 🔄');
+
+      let success = false;
+      try {
+        success = await enableOnuCatv(session.customer.abonado);
+      } catch (err) {
+        console.error('Error encendiendo CATV:', err.message);
+      }
+
+      if (!success) {
+        replies.push('No pude encender el puerto de televisión en este momento. Te voy a comunicar con un asesor. 🙌');
+        resetSession(phone);
+        return replies;
+      }
+
+      replies.push('Listo, el puerto de televisión fue encendido. Por favor revisa si ya tienes señal de TV. ¿Ya te funciona? (sí/no)');
+      session.novTvPendingOrder = 'SIN SERVICIO DE TV';
+      session.novTvSolutionType = 'visita';
+      session.step = STEPS.TV_ASK_SERVICE_OK;
+      return replies;
+    }
+
+    // catvStatus === 'enabled'
+    replies.push(
+      'Confirmo que veo el servicio de televisión habilitado sin novedades desde nuestro sistema.\n\n' +
+      'Por favor realiza estas validaciones:\n\n' +
+      '1️⃣ Revisa las conexiones físicas del televisor que falla (cable coaxial conectado, conector bien ajustado, sin cables ni fisuras visibles).\n' +
+      '2️⃣ Intenta resintonizar los canales nuevamente.\n\n' +
+      '¿Cómo te fue? ¿Se solucionó o sigue igual?'
+    );
+    session.novTvPendingOrder = 'SIN SERVICIO DE TV';
+    session.novTvSolutionType = 'visita';
+    session.step = STEPS.TV_ASK_VALIDATION_RESULT;
+    return replies;
+  }
+
+  // -------- Flujo TV: ¿todo el tiempo o en una franja horaria? --------
+  if (session.step === STEPS.TV_ASK_TIME_PATTERN) {
+    const pattern = classifyTimePattern(text);
+
+    if (!pattern) {
+      replies.push('¿Podrías indicarme con el número? 1️⃣ Todo el tiempo, 2️⃣ Solo en un horario específico.');
+      return replies;
+    }
+
+    if (pattern === 'franja') {
+      session.novTvPendingOrder = 'INTERMITENCIA/LENTITUD TELEVISIÓN';
+      session.novTvSolutionType = 'remota';
+      replies.push(await buildCrearOrdenMessage(session.customer.abonado, session.novTvPendingOrder));
+      replies.push('Para este tipo de casos, nuestro equipo de ingeniería suele dar una solución de forma remota.');
+      replies.push('¿Hay algo más en lo que pueda ayudarte? (sí/no)');
+      session.step = STEPS.ASK_ANYTHING_ELSE;
+      return replies;
+    }
+
+    // pattern === 'siempre'
+    replies.push(
+      '¿Y si tienes varios televisores, esto ocurre en...\n\n' +
+      '1️⃣ Todos los televisores\n' +
+      '2️⃣ Solo en uno'
+    );
+    session.step = STEPS.TV_ASK_TV_COUNT;
+    return replies;
+  }
+
+  // -------- Flujo TV: ¿todos los televisores o solo uno? --------
+  if (session.step === STEPS.TV_ASK_TV_COUNT) {
+    const scope = classifyDeviceScope(text); // reutilizamos el clasificador todos/uno
+
+    if (!scope) {
+      replies.push('¿Podrías indicarme con el número? 1️⃣ Todos los televisores, 2️⃣ Solo uno.');
+      return replies;
+    }
+
+    session.novTvPendingOrder = 'INTERMITENCIA/LENTITUD TELEVISIÓN';
+    session.novTvSolutionType = 'remota';
+
+    if (scope === 'todos') {
+      replies.push(await buildCrearOrdenMessage(session.customer.abonado, session.novTvPendingOrder));
+      replies.push('Para este tipo de casos, nuestro equipo de ingeniería suele dar una solución de forma remota.');
+      replies.push('¿Hay algo más en lo que pueda ayudarte? (sí/no)');
+      session.step = STEPS.ASK_ANYTHING_ELSE;
+      return replies;
+    }
+
+    // scope === 'uno'
+    replies.push(
+      'Por favor realiza estas validaciones:\n\n' +
+      '1️⃣ Revisa las conexiones físicas del televisor que falla (cable coaxial conectado, conector bien ajustado, sin cables ni fisuras visibles).\n' +
+      '2️⃣ Intenta resintonizar los canales nuevamente.\n\n' +
+      '¿Cómo te fue? ¿Se solucionó o sigue igual?'
+    );
+    session.step = STEPS.TV_ASK_VALIDATION_RESULT;
+    return replies;
+  }
+
+  // -------- Flujo TV: ¿ya hay señal tras encender el puerto CATV? --------
+  if (session.step === STEPS.TV_ASK_SERVICE_OK) {
+    if (isAffirmative(text)) {
+      replies.push('¡Excelente! Me alegra que ya tengas señal de televisión. 🙌');
+      replies.push('¿Hay algo más en lo que pueda ayudarte? (sí/no)');
+      session.step = STEPS.ASK_ANYTHING_ELSE;
+      return replies;
+    }
+
+    if (isNegative(text)) {
+      replies.push(
+        'Entiendo. Por favor realiza estas validaciones:\n\n' +
+        '1️⃣ Revisa las conexiones físicas del televisor que falla (cable coaxial conectado, conector bien ajustado, sin cables ni fisuras visibles).\n' +
+        '2️⃣ Intenta resintonizar los canales nuevamente.\n\n' +
+        '¿Cómo te fue? ¿Se solucionó o sigue igual?'
+      );
+      session.step = STEPS.TV_ASK_VALIDATION_RESULT;
+      return replies;
+    }
+
+    replies.push('¿Podrías confirmarme con un *sí* o un *no*? ¿Ya tienes señal de televisión?');
+    return replies;
+  }
+
+  // -------- Flujo TV: resultado tras validaciones físicas --------
+  if (session.step === STEPS.TV_ASK_VALIDATION_RESULT) {
+    const result = classifyImprovement(text);
+
+    if (result === 'mejoro') {
+      replies.push('¡Excelente! Me alegra que se haya solucionado. 🙌');
+      replies.push('¿Hay algo más en lo que pueda ayudarte? (sí/no)');
+      session.step = STEPS.ASK_ANYTHING_ELSE;
+      return replies;
+    }
+
+    if (result === 'igual') {
+      replies.push(await buildCrearOrdenMessage(session.customer.abonado, session.novTvPendingOrder));
+      if (session.novTvSolutionType === 'remota') {
+        replies.push('Para este tipo de casos, nuestro equipo de ingeniería suele dar una solución de forma remota.');
+      } else {
+        replies.push(
+          'Este caso podría estar relacionado con un daño físico (puerto de televisión del módem o cableado coaxial), por lo que se atenderá con visita técnica.'
+        );
+      }
+      replies.push('¿Hay algo más en lo que pueda ayudarte? (sí/no)');
+      session.step = STEPS.ASK_ANYTHING_ELSE;
+      return replies;
+    }
+
+    replies.push('Cuéntame, ¿la falla se solucionó o sigue igual?');
+    return replies;
+  }
+
   // -------- Flujo velocidad: ¿por cable o por wifi? --------
   if (session.step === STEPS.NOV_SPEED_ASK_METHOD) {
     const method = classifyTestMethod(text);
@@ -857,6 +1072,8 @@ async function handleMessage(phone, text) {
       session.novAppName = null;
       session.novPlanMbps = null;
       session.novSpeedMethod = null;
+      session.novTvPendingOrder = null;
+      session.novTvSolutionType = null;
       session.step = STEPS.ASK_REQUIREMENT;
       return replies;
     }
