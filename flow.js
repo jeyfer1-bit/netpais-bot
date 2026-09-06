@@ -352,8 +352,11 @@ async function handleMessage(phone, text) {
       } catch (err) {
         console.error('Error consultando órdenes:', err.message);
         replies.push('No pude consultar el estado de tu orden en este momento. Te voy a comunicar con un asesor. 🙌');
+        resetSession(phone);
+        return replies;
       }
-      resetSession(phone);
+      replies.push('¿Hay algo más en lo que pueda ayudarte? (sí/no)');
+      session.step = STEPS.ASK_ANYTHING_ELSE;
       return replies;
     }
 
@@ -436,7 +439,7 @@ async function handleMessage(phone, text) {
         session.novPlanMbps = planMbps;
 
         replies.push(
-          `Actualmente vemos que tienes contratado un plan de ${planMbps ? `${planMbps} Mbps` : speedProfile.downloadProfile} de bajada.\n\n` +
+          `Actualmente vemos que tienes contratado un plan de ${planMbps ? `${planMbps} Mbps` : speedProfile.downloadProfile}.\n\n` +
           'Para que el test de velocidad sea confiable, ten en cuenta esto:\n\n' +
           '1️⃣ Lo ideal es hacer la prueba desde un computador conectado por cable ethernet, para garantizar que el equipo (celular, tablet, etc.) no tenga limitaciones en su tarjeta de red.\n' +
           '2️⃣ Si no cuentas con un computador, también podemos hacerla por WiFi, conectado a la red de 5GHz.\n\n' +
@@ -498,7 +501,8 @@ async function handleMessage(phone, text) {
         'Perfecto, dame un momento mientras continúo con tu solicitud. 🙌 ' +
         `(Aquí conecta el Flujo 4, según la categoría: ${session.novedadCategory}.)`
       );
-      resetSession(phone);
+      replies.push('¿Hay algo más en lo que pueda ayudarte? (sí/no)');
+      session.step = STEPS.ASK_ANYTHING_ELSE;
       return replies;
     }
 
@@ -770,8 +774,8 @@ async function handleMessage(phone, text) {
       replies.push(
         'Recuerda que puede haber una variación de hasta -10% por temas de interferencias o consumo de ancho de banda de apps en segundo plano, y aun así se considera un resultado satisfactorio. Con base en eso, tu resultado está dentro de lo esperado. 🙌'
       );
-      replies.push('Gracias por contactarte con netpaís 🙌 Vamos a cerrar este chat. Si necesitas algo más, escríbenos de nuevo cuando quieras. 👋');
-      resetSession(phone);
+      replies.push('¿Hay algo más en lo que pueda ayudarte? (sí/no)');
+      session.step = STEPS.ASK_ANYTHING_ELSE;
       return replies;
     }
 
@@ -780,15 +784,16 @@ async function handleMessage(phone, text) {
       replies.push(
         'Entiendo. Como la prueba se hizo por WiFi, te recomiendo repetirla desde un computador conectado por cable ethernet apenas puedas — eso nos da un resultado más confiable. Cuando la tengas, escríbenos de nuevo y te acompañamos otra vez con gusto. 🙌'
       );
-      resetSession(phone);
+      replies.push('¿Hay algo más en lo que pueda ayudarte? (sí/no)');
+      session.step = STEPS.ASK_ANYTHING_ELSE;
       return replies;
     }
 
     // method === 'cable' y resultado negativo
     replies.push(await buildCrearOrdenMessage(session.customer.abonado, 'INTERMITENCIA/LENTITUD INTERNET'));
     replies.push('Nuestro equipo de ingeniería revisará tu caso para darte una solución lo antes posible.');
-    replies.push('Gracias por contactarte con netpaís 🙌 Vamos a cerrar este chat. Si necesitas algo más, escríbenos de nuevo cuando quieras. 👋');
-    resetSession(phone);
+    replies.push('¿Hay algo más en lo que pueda ayudarte? (sí/no)');
+    session.step = STEPS.ASK_ANYTHING_ELSE;
     return replies;
   }
 
