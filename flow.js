@@ -28,7 +28,7 @@ const {
   buildConfirmationMessage,
   CLARIFYING_MESSAGE,
 } = require('./novedad');
-const { checkOrdenStatus, getTiempoEstimado } = require('./ordenes');
+const { checkOrdenStatus, getTipificacionInfo } = require('./ordenes');
 
 // sessions: Map<numeroDeWhatsapp, sessionObject>
 const sessions = new Map();
@@ -182,15 +182,24 @@ function classifyImprovement(text) {
 
 /**
  * Construye el mensaje de "voy a crear una orden de..." incluyendo el
- * tiempo estimado desde Tipificación. No inserta la orden en ningún
- * lado todavía (falta la API de creación) — solo informa al cliente.
+ * tiempo estimado Y el tipo de revisión (remota / física) reales,
+ * ambos desde la tabla Tipificación — así el mensaje nunca contradice
+ * lo que dice la tabla (antes se asumía "visita técnica" a mano en
+ * cada rama del código, lo que generaba mensajes inconsistentes).
+ * No inserta la orden en ningún lado todavía (falta la API de
+ * creación) — solo informa al cliente.
  */
 async function buildCrearOrdenMessage(abonado, detalleOrden) {
-  const tiempo = await getTiempoEstimado(abonado, detalleOrden);
-  return (
-    `Vamos a crear una orden de visita técnica por "${detalleOrden}"` +
-    (tiempo ? `, la cual será atendida en un máximo de ${tiempo}.` : '.')
-  );
+  const info = await getTipificacionInfo(abonado, detalleOrden);
+
+  if (!info) {
+    return `Vamos a crear una orden por "${detalleOrden}".`;
+  }
+
+  const tipoTexto = info.tipoRevision ? ` de forma ${info.tipoRevision.toLowerCase()}` : '';
+  const tiempoTexto = info.tiempo ? `, la cual será atendida en un máximo de ${info.tiempo}` : '';
+
+  return `Vamos a crear una orden por "${detalleOrden}"${tiempoTexto}${tipoTexto ? ',' : ''}${tipoTexto}.`;
 }
 
 // -------- Incidente conocido: entrega de video de Google/YouTube --------
@@ -818,7 +827,6 @@ async function handleMessage(phone, text) {
 
       replies.push('Listo, el puerto de televisión fue encendido. Por favor revisa si ya tienes señal de TV. ¿Ya te funciona? (sí/no)');
       session.novTvPendingOrder = 'SIN SERVICIO DE TV';
-      session.novTvSolutionType = 'visita';
       session.step = STEPS.TV_ASK_SERVICE_OK;
       return replies;
     }
@@ -832,7 +840,6 @@ async function handleMessage(phone, text) {
       '¿Cómo te fue? ¿Se solucionó o sigue igual?'
     );
     session.novTvPendingOrder = 'SIN SERVICIO DE TV';
-    session.novTvSolutionType = 'visita';
     session.step = STEPS.TV_ASK_VALIDATION_RESULT;
     return replies;
   }
@@ -848,9 +855,7 @@ async function handleMessage(phone, text) {
 
     if (pattern === 'franja') {
       session.novTvPendingOrder = 'INTERMITENCIA/LENTITUD TELEVISIÓN';
-      session.novTvSolutionType = 'remota';
       replies.push(await buildCrearOrdenMessage(session.customer.abonado, session.novTvPendingOrder));
-      replies.push('Para este tipo de casos, nuestro equipo de ingeniería suele dar una solución de forma remota.');
       replies.push('¿Hay algo más en lo que pueda ayudarte? (sí/no)');
       session.step = STEPS.ASK_ANYTHING_ELSE;
       return replies;
@@ -876,11 +881,9 @@ async function handleMessage(phone, text) {
     }
 
     session.novTvPendingOrder = 'INTERMITENCIA/LENTITUD TELEVISIÓN';
-    session.novTvSolutionType = 'remota';
 
     if (scope === 'todos') {
       replies.push(await buildCrearOrdenMessage(session.customer.abonado, session.novTvPendingOrder));
-      replies.push('Para este tipo de casos, nuestro equipo de ingeniería suele dar una solución de forma remota.');
       replies.push('¿Hay algo más en lo que pueda ayudarte? (sí/no)');
       session.step = STEPS.ASK_ANYTHING_ELSE;
       return replies;
@@ -934,13 +937,6 @@ async function handleMessage(phone, text) {
 
     if (result === 'igual') {
       replies.push(await buildCrearOrdenMessage(session.customer.abonado, session.novTvPendingOrder));
-      if (session.novTvSolutionType === 'remota') {
-        replies.push('Para este tipo de casos, nuestro equipo de ingeniería suele dar una solución de forma remota.');
-      } else {
-        replies.push(
-          'Este caso podría estar relacionado con un daño físico (puerto de televisión del módem o cableado coaxial), por lo que se atenderá con visita técnica.'
-        );
-      }
       replies.push('¿Hay algo más en lo que pueda ayudarte? (sí/no)');
       session.step = STEPS.ASK_ANYTHING_ELSE;
       return replies;
@@ -1073,7 +1069,6 @@ async function handleMessage(phone, text) {
       session.novPlanMbps = null;
       session.novSpeedMethod = null;
       session.novTvPendingOrder = null;
-      session.novTvSolutionType = null;
       session.step = STEPS.ASK_REQUIREMENT;
       return replies;
     }

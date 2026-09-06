@@ -194,16 +194,21 @@ async function checkOrdenStatus(abonado) {
 }
 
 /**
- * Devuelve el texto de "Tiempo" (SLA) definido en la tabla Tipificación
- * para un detalle_orden específico (ej: "24 horas"), o null si no se
- * encuentra. Por ahora no existe una API para CREAR la orden en Excel —
- * esto solo se usa para informarle al cliente cuánto tardará, mientras
- * se habilita esa API.
+ * Devuelve el Tiempo (SLA) y el Tipo de revisión (ej: "Remota" /
+ * "Física") definidos en la tabla Tipificación para un detalle_orden
+ * específico, o null si no se encuentra. Por ahora no existe una API
+ * para CREAR la orden en Excel — esto solo se usa para informarle al
+ * cliente cómo y cuándo será atendido, mientras se habilita esa API.
  */
-async function getTiempoEstimado(abonado, detalleOrden) {
+async function getTipificacionInfo(abonado, detalleOrden) {
   const { tipificacion } = await fetchOrdenesYTipificacion(abonado);
   const tip = findTipificacion(tipificacion, detalleOrden);
-  return tip ? tip.Tiempo : null;
+  if (!tip) return null;
+
+  return {
+    tiempo: tip.Tiempo || null,
+    tipoRevision: tip['Tipo de revisión'] || null,
+  };
 }
 
-module.exports = { checkOrdenStatus, getTiempoEstimado };
+module.exports = { checkOrdenStatus, getTipificacionInfo };
