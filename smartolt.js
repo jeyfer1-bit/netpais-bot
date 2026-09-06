@@ -220,10 +220,47 @@ async function rebootOnu(abonado) {
   }
 }
 
+/**
+ * Consulta el plan (perfil de velocidad) configurado en SmartOLT para
+ * la ONU de un abonado. Siempre se usa el de "download" para comparar
+ * contra los test de velocidad del cliente, tal como se acordó.
+ * @param {string} abonado
+ * @returns {Promise<{ uploadProfile: string, downloadProfile: string } | null>}
+ */
+async function getOnuSpeedProfiles(abonado) {
+  const city = getCityFromAbonado(abonado);
+  if (!city) return null;
+
+  const { baseUrl, apiKeys } = getCityConfig(city);
+  if (!baseUrl || apiKeys.length === 0) return null;
+
+  const entries = await getCityOnuList(city);
+  const match = findOnuInList(entries, abonado);
+  if (!match) return null;
+
+  try {
+    const response = await axios.get(
+      `${baseUrl}/api/onu/get_onu_speed_profiles/${encodeURIComponent(match.externalId)}`,
+      { headers: { 'X-Token': match.apiKey }, validateStatus: (s) => s === 200 || s === 400 }
+    );
+
+    if (response.status !== 200 || !response.data?.status) return null;
+
+    return {
+      uploadProfile: response.data.upload_speed_profile_name,
+      downloadProfile: response.data.download_speed_profile_name,
+    };
+  } catch (err) {
+    console.warn(`⚠️  Error consultando perfil de velocidad en SmartOLT:`, err.message);
+    return null;
+  }
+}
+
 module.exports = {
   getOnuSignal,
   translateStatus,
   translateSignal,
   formatLastStatusChange,
   rebootOnu,
+  getOnuSpeedProfiles,
 };

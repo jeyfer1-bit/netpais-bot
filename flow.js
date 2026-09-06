@@ -18,6 +18,7 @@ const {
   translateSignal,
   formatLastStatusChange,
   rebootOnu,
+  getOnuSpeedProfiles,
 } = require('./smartolt');
 const {
   classify,
@@ -49,7 +50,13 @@ const STEPS = {
   // Flujo 2: problemas con aplicaciones o páginas web
   NOV_APP_ASK_NAME: 'NOV_APP_ASK_NAME', // ¿qué página/app presenta la novedad?
   NOV_APP_ASK_MOBILE_RESULT: 'NOV_APP_ASK_MOBILE_RESULT', // ¿persiste usando datos móviles?
+
+  // Flujo: velocidad contratada vs. test de velocidad
+  NOV_SPEED_ASK_METHOD: 'NOV_SPEED_ASK_METHOD', // ¿test por cable o por wifi?
+  NOV_SPEED_ASK_RESULT: 'NOV_SPEED_ASK_RESULT', // esperando el resultado del test
 };
+
+const SPEED_TEST_TOLERANCE = 0.9; // -10% de tolerancia sobre el plan contratado
 
 const REBOOT_WAIT_MS = 2 * 60 * 1000; // 2 minutos
 
@@ -191,6 +198,49 @@ const KNOWN_INCIDENT_MESSAGE =
   'Tenemos identificada esta situación 🙌 Actualmente hay una afectación en la entrega de contenido de video de Google/YouTube que impacta a varios usuarios en Colombia, especialmente entre las 7 p. m. y las 11 p. m.\n\n' +
   'Esto ocurre porque los servidores de caché de Google en Bogotá llegan a su límite de capacidad en esas horas, y el contenido empieza a traerse desde ciudades más lejanas (Miami, Nueva York, y en algunos casos Brasil o Chile), lo que aumenta la latencia. No es una falla de nuestra red: nuestros enlaces están activos y sin pérdida de paquetes.\n\n' +
   'Ufinet está en seguimiento diario con Google, quien informó que la ampliación de capacidad en Bogotá estaría entrando en operación hacia finales de agosto de 2026.';
+
+// -------- Flujo: velocidad contratada vs. test de velocidad --------
+
+// Extrae el número de Mbps de textos como "50M", "50 Mbps", "50MB", etc.
+function parseMbps(text) {
+  if (!text) return null;
+  const match = String(text).match(/(\d+(?:\.\d+)?)/);
+  return match ? Number(match[1]) : null;
+}
+
+function classifyTestMethod(text) {
+  const t = normalize(text);
+  if (t === '1' || /\bcable\b/.test(t) || /\bethernet\b/.test(t) || /\bcomputador\b/.test(t) || /\bpc\b/.test(t)) {
+    return 'cable';
+  }
+  if (t === '2' || /\bwifi\b/.test(t) || /\binalambric/.test(t)) {
+    return 'wifi';
+  }
+  return null;
+}
+
+/**
+ * Interpreta el resultado del test de velocidad que el cliente escribe
+ * en texto (se descartó el envío de pantallazo: el cliente siempre
+ * escribe el resultado).
+ * Devuelve 'positivo' | 'negativo' | null (si no se pudo interpretar).
+ */
+function classifySpeedTestResult(text, planMbps) {
+  const t = normalize(text);
+
+  // Caso 1: el cliente da el valor de bajada explícitamente
+  const bajadaMatch = t.match(/baj(ada|a)?\D{0,5}(\d+(?:\.\d+)?)/) || t.match(/(descarga|download)\D{0,5}(\d+(?:\.\d+)?)/);
+  if (bajadaMatch && planMbps) {
+    const valor = Number(bajadaMatch[2]);
+    return valor >= planMbps * SPEED_TEST_TOLERANCE ? 'positivo' : 'negativo';
+  }
+
+  // Caso 2: el cliente responde textualmente si dio bien o mal
+  if (/\bbien\b|\bnormal\b|\bcorrecto\b|\bok\b/.test(t)) return 'positivo';
+  if (/\bmal\b|\bmalo\b|\bincorrecto\b|\bbajo\b|\bpoco\b/.test(t)) return 'negativo';
+
+  return null;
+}
 
 /**
  * Procesa un mensaje entrante y devuelve el/los mensaje(s) de respuesta.
@@ -370,6 +420,29 @@ async function handleMessage(phone, text) {
       if (session.novedadCategory === 'aplicaciones') {
         replies.push('Cuéntame, ¿qué página web o aplicación te está presentando la novedad?');
         session.step = STEPS.NOV_APP_ASK_NAME;
+        return replies;
+      }
+
+      if (session.novedadCategory === 'velocidadcontratada') {
+        const speedProfile = await getOnuSpeedProfiles(session.customer.abonado);
+
+        if (!speedProfile) {
+          replies.push('No pude consultar tu plan contratado en este momento. Te voy a comunicar con un asesor. 🙌');
+          resetSession(phone);
+          return replies;
+        }
+
+        const planMbps = parseMbps(speedProfile.downloadProfile);
+        session.novPlanMbps = planMbps;
+
+        replies.push(
+          `Actualmente vemos que tienes contratado un plan de ${planMbps ? `${planMbps} Mbps` : speedProfile.downloadProfile} de bajada.\n\n` +
+          'Para que el test de velocidad sea confiable, ten en cuenta esto:\n\n' +
+          '1️⃣ Lo ideal es hacer la prueba desde un computador conectado por cable ethernet, para garantizar que el equipo (celular, tablet, etc.) no tenga limitaciones en su tarjeta de red.\n' +
+          '2️⃣ Si no cuentas con un computador, también podemos hacerla por WiFi, conectado a la red de 5GHz.\n\n' +
+          '¿Con cuál opción vas a realizar el test de velocidad?'
+        );
+        session.step = STEPS.NOV_SPEED_ASK_METHOD;
         return replies;
       }
 
@@ -658,6 +731,67 @@ async function handleMessage(phone, text) {
     return replies;
   }
 
+  // -------- Flujo velocidad: ¿por cable o por wifi? --------
+  if (session.step === STEPS.NOV_SPEED_ASK_METHOD) {
+    const method = classifyTestMethod(text);
+
+    if (!method) {
+      replies.push('¿Podrías confirmarme si el test lo vas a hacer 1️⃣ por cable (computador) o 2️⃣ por WiFi?');
+      return replies;
+    }
+
+    session.novSpeedMethod = method;
+
+    if (method === 'cable') {
+      replies.push(
+        'Perfecto, realiza la prueba de velocidad desde tu computador conectado por cable ethernet. Cuando termines, escríbeme el resultado (ej: "bajada 45 Mbps, subida 10 Mbps"). 📶'
+      );
+    } else {
+      replies.push(
+        'Perfecto, asegúrate de estar conectado a la red de 5GHz y ubícate cerca del módem para evitar interferencias. Realiza la prueba y escríbeme el resultado (ej: "bajada 45 Mbps, subida 10 Mbps"). 📶'
+      );
+    }
+    session.step = STEPS.NOV_SPEED_ASK_RESULT;
+    return replies;
+  }
+
+  // -------- Flujo velocidad: resultado del test --------
+  if (session.step === STEPS.NOV_SPEED_ASK_RESULT) {
+    const result = classifySpeedTestResult(text, session.novPlanMbps);
+
+    if (!result) {
+      replies.push(
+        'Cuéntame el resultado de tu test de velocidad — puedes decirme si dio bien o mal, o el valor de bajada en Mbps (ej: "bajada 45 Mbps").'
+      );
+      return replies;
+    }
+
+    if (result === 'positivo') {
+      replies.push(
+        'Recuerda que puede haber una variación de hasta -10% por temas de interferencias o consumo de ancho de banda de apps en segundo plano, y aun así se considera un resultado satisfactorio. Con base en eso, tu resultado está dentro de lo esperado. 🙌'
+      );
+      replies.push('Gracias por contactarte con netpaís 🙌 Vamos a cerrar este chat. Si necesitas algo más, escríbenos de nuevo cuando quieras. 👋');
+      resetSession(phone);
+      return replies;
+    }
+
+    // result === 'negativo'
+    if (session.novSpeedMethod === 'wifi') {
+      replies.push(
+        'Entiendo. Como la prueba se hizo por WiFi, te recomiendo repetirla desde un computador conectado por cable ethernet apenas puedas — eso nos da un resultado más confiable. Cuando la tengas, escríbenos de nuevo y te acompañamos otra vez con gusto. 🙌'
+      );
+      resetSession(phone);
+      return replies;
+    }
+
+    // method === 'cable' y resultado negativo
+    replies.push(await buildCrearOrdenMessage(session.customer.abonado, 'INTERMITENCIA/LENTITUD INTERNET'));
+    replies.push('Nuestro equipo de ingeniería revisará tu caso para darte una solución lo antes posible.');
+    replies.push('Gracias por contactarte con netpaís 🙌 Vamos a cerrar este chat. Si necesitas algo más, escríbenos de nuevo cuando quieras. 👋');
+    resetSession(phone);
+    return replies;
+  }
+
   // -------- Flujo 2: nombre de la página/app con novedad --------
   if (session.step === STEPS.NOV_APP_ASK_NAME) {
     const appName = text.trim();
@@ -716,6 +850,8 @@ async function handleMessage(phone, text) {
       session.novAlreadyRebooted = false;
       session.novRebootAt = null;
       session.novAppName = null;
+      session.novPlanMbps = null;
+      session.novSpeedMethod = null;
       session.step = STEPS.ASK_REQUIREMENT;
       return replies;
     }
