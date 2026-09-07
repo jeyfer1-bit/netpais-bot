@@ -279,9 +279,12 @@ function classifySpeedTestResult(text, planMbps) {
   const t = normalize(text);
 
   // Caso 1: el cliente da el valor de bajada explícitamente
-  const bajadaMatch = t.match(/baj(ada|a)?\D{0,5}(\d+(?:\.\d+)?)/) || t.match(/(descarga|download)\D{0,5}(\d+(?:\.\d+)?)/);
+  // (acepta "." o "," como separador decimal, por si la IA describe la
+  // imagen usando formato de número latinoamericano)
+  const bajadaMatch =
+    t.match(/baj(ada|a)?\D{0,5}(\d+(?:[.,]\d+)?)/) || t.match(/(descarga|download)\D{0,5}(\d+(?:[.,]\d+)?)/);
   if (bajadaMatch && planMbps) {
-    const valor = Number(bajadaMatch[2]);
+    const valor = Number(bajadaMatch[2].replace(',', '.'));
     return valor >= planMbps * SPEED_TEST_TOLERANCE ? 'positivo' : 'negativo';
   }
 

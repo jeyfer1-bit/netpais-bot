@@ -88,11 +88,14 @@ async function describeImage(buffer, mimeType = 'image/jpeg', contextHint = '') 
   const parts = [
     {
       text:
-        'Un cliente de un bot de soporte técnico de internet en Colombia envió esta imagen. ' +
+        'Un cliente de un bot de soporte técnico de internet en Colombia envió esta imagen durante una conversación de soporte. ' +
         (contextHint ? `En ese momento se le estaba preguntando: "${contextHint}". ` : '') +
-        'Describe en una sola frase corta, en español, lo que ves en la imagen y que sea relevante para responder esa pregunta ' +
-        '(por ejemplo: colores de LEDs encendidos, estado de cables o conectores, texto o números visibles en una pantalla). ' +
-        'Responde ÚNICAMENTE con la descripción, sin comentarios adicionales.',
+        'Sigue estas reglas ESTRICTAMENTE:\n\n' +
+        '1. Si la imagen es un pantallazo de una prueba de velocidad (speedtest u otra app similar, con un velocímetro o valores de descarga/subida), responde ÚNICAMENTE con esta línea, sin nada más, reemplazando X e Y por los números que veas (usa PUNTO como separador decimal, nunca coma, y no incluyas unidades de miles):\n' +
+        '   Bajada: X Mbps, Subida: Y Mbps\n' +
+        '2. Si es una foto de un módem/router, describe en una frase corta los colores de los LEDs encendidos y el estado de los cables/conectores.\n' +
+        '3. Si hay cualquier otro texto, número o mensaje de error visible en pantalla y no aplica lo anterior, transcríbelo tal cual.\n\n' +
+        'No agregues comentarios, explicaciones, ni texto adicional fuera de lo pedido en la regla que aplique.',
     },
     { inline_data: { mime_type: mimeType, data: buffer.toString('base64') } },
   ];
