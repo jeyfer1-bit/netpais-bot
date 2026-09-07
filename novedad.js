@@ -116,8 +116,9 @@ const NUMBER_TO_CATEGORY = {
 function classify(text) {
   const t = normalize(text);
 
-  const numberMatch = t.match(/^[1-6]$/);
-  if (numberMatch) return NUMBER_TO_CATEGORY[Number(numberMatch[0])];
+  // Acepta el número solo, o con frases naturales como "opción 2", "la 2", etc.
+  const numberMatch = t.match(/^(la |el |opcion |numero |es la |es el |la opcion |el numero |respuesta )?([1-6])\.?$/);
+  if (numberMatch) return NUMBER_TO_CATEGORY[Number(numberMatch[2])];
 
   // Orden y TV se revisan primero porque usan palabras más específicas
   // (evita que "no tengo internet" se confunda, por ejemplo).

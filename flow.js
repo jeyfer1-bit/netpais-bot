@@ -106,6 +106,26 @@ function normalize(text) {
     .replace(/[\u0300-\u036f]/g, ''); // quita acentos: sí -> si
 }
 
+/**
+ * Extrae un número de opción del texto del cliente, si el mensaje es
+ * esencialmente ese número — aceptando variantes naturales como "2",
+ * "opcion 2", "la 2", "numero 2", etc. Se ancla a todo el mensaje (no
+ * busca el número suelto dentro de una frase larga) para no confundir,
+ * por ejemplo, "tengo 2 televisores" con una respuesta "2".
+ * @returns {number|null}
+ */
+function extractOptionNumber(text) {
+  const t = normalize(text);
+  const prefijos = '(la |el |opcion |numero |es la |es el |la opcion |el numero |respuesta )?';
+  const match = t.trim().match(new RegExp(`^${prefijos}(\\d+)\\.?$`));
+  return match ? Number(match[2]) : null;
+}
+
+/** Igual que extractOptionNumber, pero para verificar un número fijo específico. */
+function isOptionNumber(text, n) {
+  return extractOptionNumber(text) === n;
+}
+
 // Se usa \b (límite de palabra) para no confundir "si" dentro de
 // "asisti" o "positivo", por ejemplo.
 const AFFIRMATIVE_PATTERNS = [
@@ -156,9 +176,9 @@ function classifyLedColor(text) {
 
 function classifyDeviceScope(text) {
   const t = normalize(text);
-  if (t === '1' || /\btodos\b/.test(t) || /\btodo(s)? los dispositivos\b/.test(t)) return 'todos';
+  if (isOptionNumber(text, 1) || /\btodos\b/.test(t) || /\btodo(s)? los dispositivos\b/.test(t)) return 'todos';
   if (
-    t === '2' ||
+    isOptionNumber(text, 2) ||
     /\bsolo uno\b/.test(t) ||
     /\buno solo\b/.test(t) ||
     /\bun (dispositivo|equipo|celular|computador|pc)\b/.test(t) ||
@@ -171,9 +191,9 @@ function classifyDeviceScope(text) {
 
 function classifyTimePattern(text) {
   const t = normalize(text);
-  if (t === '1' || /\btodo el tiempo\b/.test(t) || /\bsiempre\b/.test(t) || /\bconstante/.test(t)) return 'siempre';
+  if (isOptionNumber(text, 1) || /\btodo el tiempo\b/.test(t) || /\bsiempre\b/.test(t) || /\bconstante/.test(t)) return 'siempre';
   if (
-    t === '2' ||
+    isOptionNumber(text, 2) ||
     /\bhorario\b/.test(t) ||
     /\bfranja\b/.test(t) ||
     /\bhoras\b/.test(t) ||
@@ -240,10 +260,10 @@ function parseMbps(text) {
 
 function classifyTestMethod(text) {
   const t = normalize(text);
-  if (t === '1' || /\bcable\b/.test(t) || /\bethernet\b/.test(t) || /\bcomputador\b/.test(t) || /\bpc\b/.test(t)) {
+  if (isOptionNumber(text, 1) || /\bcable\b/.test(t) || /\bethernet\b/.test(t) || /\bcomputador\b/.test(t) || /\bpc\b/.test(t)) {
     return 'cable';
   }
-  if (t === '2' || /\bwifi\b/.test(t) || /\binalambric/.test(t)) {
+  if (isOptionNumber(text, 2) || /\bwifi\b/.test(t) || /\binalambric/.test(t)) {
     return 'wifi';
   }
   return null;
@@ -276,8 +296,8 @@ function classifySpeedTestResult(text, planMbps) {
 
 function classifyTvScope(text) {
   const t = normalize(text);
-  if (t === '1' || /\bcanal(es)?\b/.test(t) || /\balgunos\b/.test(t)) return 'canales';
-  if (t === '2' || /\btotal\b/.test(t) || /\bningun/.test(t) || /\bno veo nada\b/.test(t) || /\btodos los canales\b/.test(t)) {
+  if (isOptionNumber(text, 1) || /\bcanal(es)?\b/.test(t) || /\balgunos\b/.test(t)) return 'canales';
+  if (isOptionNumber(text, 2) || /\btotal\b/.test(t) || /\bningun/.test(t) || /\bno veo nada\b/.test(t) || /\btodos los canales\b/.test(t)) {
     return 'total';
   }
   return null;
@@ -478,9 +498,9 @@ async function handleMessage(phone, text) {
 
     let chosen = null;
 
-    const numberMatch = t2.match(/^(\d+)$/);
-    if (numberMatch) {
-      const idx = Number(numberMatch[1]) - 1;
+    const numberChoice = extractOptionNumber(t2);
+    if (numberChoice !== null) {
+      const idx = numberChoice - 1;
       if (idx >= 0 && idx < options.length) chosen = options[idx];
     }
 
