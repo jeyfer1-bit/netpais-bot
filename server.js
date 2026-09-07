@@ -3,7 +3,8 @@
 require('dotenv').config();
 const express = require('express');
 const { handleMessage } = require('./flow');
-const { sendTextMessage } = require('./whatsapp');
+const { sendTextMessage, downloadMedia } = require('./whatsapp');
+const { transcribeAudio, describeImage } = require('./ai');
 
 const app = express();
 app.use(express.json());
@@ -52,16 +53,47 @@ app.post('/webhook', async (req, res) => {
 
     const from = message.from; // número del usuario, ej: "573001234567"
     const type = message.type;
-    const textBody = type === 'text' ? message.text.body : null;
+    let textBody = null;
 
-    console.log(`📩 Mensaje de ${from} (${type}): ${textBody ?? '[contenido no textual]'}`);
+    if (type === 'text') {
+      textBody = message.text.body;
+    } else if (type === 'audio') {
+      try {
+        const { buffer, mimeType } = await downloadMedia(message.audio.id);
+        textBody = await transcribeAudio(buffer, mimeType);
+      } catch (err) {
+        console.error('Error descargando/transcribiendo audio:', err?.response?.data || err.message);
+      }
 
-    if (!textBody) {
-      await sendTextMessage(from, 'Por ahora solo puedo leer mensajes de texto 🙏');
+      if (!textBody) {
+        await sendTextMessage(from, 'No logré escuchar bien tu nota de voz 🙏 ¿Podrías escribirlo, por favor?');
+        return;
+      }
+      console.log(`🎙️ Transcripción de ${from}: ${textBody}`);
+    } else if (type === 'image') {
+      try {
+        const { buffer, mimeType } = await downloadMedia(message.image.id);
+        textBody = await describeImage(buffer, mimeType);
+      } catch (err) {
+        console.error('Error descargando/describiendo imagen:', err?.response?.data || err.message);
+      }
+
+      if (!textBody) {
+        await sendTextMessage(from, 'No logré interpretar bien la imagen 🙏 ¿Podrías contarme con palabras qué ves?');
+        return;
+      }
+      console.log(`🖼️ Descripción de imagen de ${from}: ${textBody}`);
+    } else {
+      await sendTextMessage(from, 'Por ahora puedo leer mensajes de texto, notas de voz e imágenes 🙏');
       return;
     }
 
+    console.log(`📩 Mensaje de ${from} (${type}): ${textBody}`);
+
     // ------ Flujo conversacional (pipeline) ------
+    // A partir de aquí, textBody es siempre texto plano (venga de donde
+    // venga) — handleMessage nunca sabe si el mensaje original era
+    // texto, una nota de voz transcrita, o una imagen descrita.
     const replies = await handleMessage(from, textBody);
     for (const reply of replies) {
       await sendTextMessage(from, reply);

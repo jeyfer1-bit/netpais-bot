@@ -31,6 +31,7 @@ const {
   buildConfirmationMessage,
   CLARIFYING_MESSAGE,
 } = require('./novedad');
+const { classifyNovedadWithAI } = require('./ai');
 const { checkOrdenStatus, getTipificacionInfo } = require('./ordenes');
 
 // sessions: Map<numeroDeWhatsapp, sessionObject>
@@ -39,6 +40,7 @@ const sessions = new Map();
 const STEPS = {
   ASK_IS_CLIENT: 'ASK_IS_CLIENT',
   ASK_ID: 'ASK_ID',
+  ASK_CUSTOMER_CHOICE: 'ASK_CUSTOMER_CHOICE', // varios abonados asociados a la misma cédula
   ASK_REQUIREMENT: 'ASK_REQUIREMENT', // Flujo 3: identificar la novedad
   CONFIRM_NOVEDAD: 'CONFIRM_NOVEDAD', // Flujo 3: confirmar antes de pasar al Flujo 4
   ASK_ANYTHING_ELSE: 'ASK_ANYTHING_ELSE', // Tras resolver la novedad: ¿algo más o cerramos?
@@ -86,6 +88,7 @@ function getOrCreateSession(phone) {
       step: null,
       idAttempts: 0,
       customer: null,
+      customerOptions: null,
     });
   }
   return sessions.get(phone);
@@ -298,6 +301,81 @@ function classifyValidationConfirm(text) {
 }
 
 /**
+ * Continúa el flujo una vez que ya se tiene un cliente específico
+ * identificado (ya sea porque hubo una única coincidencia al buscar,
+ * o porque el cliente eligió uno entre varios abonados asociados a su
+ * cédula). Aplica el guardado en sesión y toda la ramificación por
+ * estado del servicio.
+ */
+async function proceedWithCustomer(session, phone, customer, replies) {
+  session.customer = customer;
+  replies.push(`¡Listo, ${customer.nombre}! 🙌 Ya te ubiqué en el sistema.`);
+
+  const estado = customer.estado.toLowerCase();
+
+  if (estado === 'activo') {
+    replies.push(`Tu servicio está: *${customer.estado}* ✅`);
+
+    // -------- Flujo 2: Validar abonado SmartOLT --------
+    const onu = await getOnuSignal(customer.abonado);
+    if (onu) {
+      replies.push(
+        `¡Listo! Ya validé tu servicio 🙌 Tu conexión está ${translateStatus(onu.status)}, ` +
+        `la señal está ${translateSignal(onu.signal)}, ` +
+        `y el último cambio fue el ${formatLastStatusChange(onu.lastStatusChange)}.`
+      );
+    } else {
+      replies.push(
+        'No pude validar automáticamente el estado de tu conexión en este momento, pero seguimos con tu solicitud.'
+      );
+    }
+
+    replies.push('¿Qué tipo de novedad presentas?');
+    session.step = STEPS.ASK_REQUIREMENT;
+    return replies;
+  }
+
+  if (estado === 'por instalar') {
+    replies.push(`Tu servicio está: *${customer.estado}* 🛠️`);
+    replies.push('Voy a revisar el estado de tu orden de instalación...');
+    try {
+      const ordenReplies = await checkOrdenStatus(customer.abonado);
+      replies.push(...ordenReplies);
+    } catch (err) {
+      console.error('Error consultando órdenes:', err.message);
+      replies.push('No pude consultar el estado de tu orden en este momento. Te voy a comunicar con un asesor. 🙌');
+      resetSession(phone);
+      return replies;
+    }
+    replies.push('¿Hay algo más en lo que pueda ayudarte? (sí/no)');
+    session.step = STEPS.ASK_ANYTHING_ELSE;
+    return replies;
+  }
+
+  if (estado === 'cortado') {
+    replies.push(`Tu servicio está: *${customer.estado}* ⚠️`);
+    replies.push(
+      'Para poder brindarte soporte técnico, primero necesitas ponerte al día con tu pago. Una vez lo hagas, escríbenos de nuevo y con gusto te ayudamos.'
+    );
+    resetSession(phone);
+    return replies;
+  }
+
+  if (estado === 'retirado' || estado === 'retirado m') {
+    replies.push(`Tu servicio figura como: *${customer.estado}*.`);
+    replies.push('Te voy a comunicar con un asesor para que revise tu caso. 🙌');
+    resetSession(phone);
+    return replies;
+  }
+
+  // Estado no contemplado explícitamente
+  replies.push(`Tu servicio está: *${customer.estado}*.`);
+  replies.push('Te voy a comunicar con un asesor para revisar tu caso. 🙌');
+  resetSession(phone);
+  return replies;
+}
+
+/**
  * Procesa un mensaje entrante y devuelve el/los mensaje(s) de respuesta.
  * @param {string} phone - número de WhatsApp del cliente
  * @param {string} text - texto que escribió
@@ -349,9 +427,15 @@ async function handleMessage(phone, text) {
 
   // -------- Paso: pedir cédula/abonado y buscar en Excel --------
   if (session.step === STEPS.ASK_ID) {
-    const customer = await findCustomer(text);
+    let matches;
+    try {
+      matches = await findCustomer(text);
+    } catch (err) {
+      console.error('Error buscando cliente:', err.message);
+      matches = [];
+    }
 
-    if (!customer) {
+    if (!matches || matches.length === 0) {
       session.idAttempts += 1;
 
       if (session.idAttempts >= MAX_ID_ATTEMPTS) {
@@ -369,78 +453,68 @@ async function handleMessage(phone, text) {
       return replies;
     }
 
-    // Cliente encontrado
-    session.customer = customer;
     session.idAttempts = 0;
-    replies.push(`¡Listo, ${customer.nombre}! 🙌 Ya te ubiqué en el sistema.`);
 
-    const estado = customer.estado.toLowerCase();
-
-    if (estado === 'activo') {
-      replies.push(`Tu servicio está: *${customer.estado}* ✅`);
-
-      // -------- Flujo 2: Validar abonado SmartOLT --------
-      const onu = await getOnuSignal(customer.abonado);
-      if (onu) {
-        replies.push(
-          `¡Listo! Ya validé tu servicio 🙌 Tu conexión está ${translateStatus(onu.status)}, ` +
-          `la señal está ${translateSignal(onu.signal)}, ` +
-          `y el último cambio fue el ${formatLastStatusChange(onu.lastStatusChange)}.`
-        );
-      } else {
-        replies.push(
-          'No pude validar automáticamente el estado de tu conexión en este momento, pero seguimos con tu solicitud.'
-        );
-      }
-
-      replies.push('¿Qué tipo de novedad presentas?');
-      session.step = STEPS.ASK_REQUIREMENT;
-      return replies;
+    if (matches.length === 1) {
+      return proceedWithCustomer(session, phone, matches[0], replies);
     }
 
-    if (estado === 'por instalar') {
-      replies.push(`Tu servicio está: *${customer.estado}* 🛠️`);
-      replies.push('Voy a revisar el estado de tu orden de instalación...');
-      try {
-        const ordenReplies = await checkOrdenStatus(customer.abonado);
-        replies.push(...ordenReplies);
-      } catch (err) {
-        console.error('Error consultando órdenes:', err.message);
-        replies.push('No pude consultar el estado de tu orden en este momento. Te voy a comunicar con un asesor. 🙌');
-        resetSession(phone);
-        return replies;
-      }
-      replies.push('¿Hay algo más en lo que pueda ayudarte? (sí/no)');
-      session.step = STEPS.ASK_ANYTHING_ELSE;
-      return replies;
-    }
-
-    if (estado === 'cortado') {
-      replies.push(`Tu servicio está: *${customer.estado}* ⚠️`);
-      replies.push(
-        'Para poder brindarte soporte técnico, primero necesitas ponerte al día con tu pago. Una vez lo hagas, escríbenos de nuevo y con gusto te ayudamos.'
-      );
-      resetSession(phone);
-      return replies;
-    }
-
-    if (estado === 'retirado' || estado === 'retirado m') {
-      replies.push(`Tu servicio figura como: *${customer.estado}*.`);
-      replies.push('Te voy a comunicar con un asesor para que revise tu caso. 🙌');
-      resetSession(phone);
-      return replies;
-    }
-
-    // Estado no contemplado explícitamente
-    replies.push(`Tu servicio está: *${customer.estado}*.`);
-    replies.push('Te voy a comunicar con un asesor para revisar tu caso. 🙌');
-    resetSession(phone);
+    // Varios abonados asociados a la misma cédula: el cliente debe elegir
+    session.customerOptions = matches;
+    replies.push(
+      `Encontré ${matches.length} servicios asociados a este documento. ¿Con cuál abonado quieres continuar?\n\n` +
+      matches
+        .map((m, i) => `${i + 1}️⃣ Abonado *${m.abonado}* — ${m.estado} — ${m.barrio || 'sin barrio registrado'}`)
+        .join('\n')
+    );
+    session.step = STEPS.ASK_CUSTOMER_CHOICE;
     return replies;
+  }
+
+  // -------- Paso: elegir cuál abonado usar (varios bajo la misma cédula) --------
+  if (session.step === STEPS.ASK_CUSTOMER_CHOICE) {
+    const options = session.customerOptions || [];
+    const t2 = text.trim();
+
+    let chosen = null;
+
+    const numberMatch = t2.match(/^(\d+)$/);
+    if (numberMatch) {
+      const idx = Number(numberMatch[1]) - 1;
+      if (idx >= 0 && idx < options.length) chosen = options[idx];
+    }
+
+    if (!chosen) {
+      // También aceptamos que escriba el número de abonado directamente
+      chosen = options.find((m) => m.abonado.toUpperCase() === t2.toUpperCase());
+    }
+
+    if (!chosen) {
+      replies.push(
+        `No logré identificar cuál elegiste 🙏 Respóndeme con el número de la lista (1 a ${options.length}), o escribe directamente el número de abonado.`
+      );
+      return replies;
+    }
+
+    session.customerOptions = null;
+    return proceedWithCustomer(session, phone, chosen, replies);
   }
 
   // -------- Paso: identificar la novedad (Flujo 3) --------
   if (session.step === STEPS.ASK_REQUIREMENT) {
-    const category = classify(text);
+    let category = classify(text);
+
+    // Respaldo con IA (Nivel 1): solo se intenta si el matching por
+    // palabras clave no logró identificar la categoría. Si Gemini
+    // tampoco puede, cae al menú numerado de siempre — nunca se queda
+    // sin salida.
+    if (!category) {
+      try {
+        category = await classifyNovedadWithAI(text);
+      } catch (err) {
+        console.error('Error clasificando novedad con IA:', err.message);
+      }
+    }
 
     if (!category) {
       replies.push(CLARIFYING_MESSAGE);

@@ -87,4 +87,29 @@ async function sendImageMessage(to, buffer, caption) {
   );
 }
 
-module.exports = { sendTextMessage, sendImageMessage };
+/**
+ * Descarga el contenido binario de un archivo multimedia entrante
+ * (audio o imagen) usando su media_id. Es un proceso de 2 pasos:
+ * primero se pide la URL real del archivo, luego se descarga esa URL
+ * (ambos pasos requieren el mismo token de autenticación).
+ *
+ * @param {string} mediaId
+ * @returns {Promise<{ buffer: Buffer, mimeType: string }>}
+ */
+async function downloadMedia(mediaId) {
+  const metaResponse = await axios.get(
+    `https://graph.facebook.com/${GRAPH_API_VERSION}/${mediaId}`,
+    { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
+  );
+
+  const { url, mime_type: mimeType } = metaResponse.data;
+
+  const fileResponse = await axios.get(url, {
+    headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` },
+    responseType: 'arraybuffer',
+  });
+
+  return { buffer: Buffer.from(fileResponse.data), mimeType };
+}
+
+module.exports = { sendTextMessage, sendImageMessage, downloadMedia };
