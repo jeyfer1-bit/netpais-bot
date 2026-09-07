@@ -70,6 +70,10 @@ app.post('/webhook', async (req, res) => {
         return;
       }
       console.log(`🎙️ Transcripción de ${from}: ${textBody}`);
+
+      // Confirmamos lo que entendimos ANTES de seguir con el flujo,
+      // para que el cliente sepa que su nota de voz sí fue procesada.
+      await sendTextMessage(from, `🎙️ Escuché: "${textBody}"`);
     } else if (type === 'image') {
       try {
         const { buffer, mimeType } = await downloadMedia(message.image.id);
@@ -83,6 +87,10 @@ app.post('/webhook', async (req, res) => {
         return;
       }
       console.log(`🖼️ Descripción de imagen de ${from}: ${textBody}`);
+
+      // Mismo principio: confirmamos lo que vimos antes de continuar,
+      // para que el cliente sepa que su imagen sí fue procesada.
+      await sendTextMessage(from, `👀 Esto es lo que veo en tu imagen: ${textBody}`);
     } else {
       await sendTextMessage(from, 'Por ahora puedo leer mensajes de texto, notas de voz e imágenes 🙏');
       return;
