@@ -115,20 +115,32 @@ function formatFecha(rawDate) {
   });
 }
 
-// TODO: cuando definamos dónde se guarda, reemplazar este log por el
-// registro real (otra hoja de Excel, una tabla, etc.)
-function registrarIncumplimientoSLA(abonado, orden) {
+// Registro de órdenes con SLA vencido. server.js lo conecta a
+// conversaciones.registrarSlaVencida (tabla bot_sla_vencidas en Postgres),
+// de donde el tablero programador las toma para darles prioridad 1.
+let alVencerSla = null;
+function setRegistroSla(fn) {
+  alVencerSla = fn;
+}
+
+function registrarIncumplimientoSLA(abonado, orden, ctx = {}) {
   console.log(
     `🚨 SLA vencido — abonado: ${abonado}, orden: ${orden.nro_orden} (${orden.detalle_orden}), fecha: ${new Date().toISOString()}`
   );
+  if (alVencerSla) {
+    Promise.resolve()
+      .then(() => alVencerSla({ abonado, orden, telefono: ctx.telefono || null }))
+      .catch((err) => console.error('Error registrando SLA vencido:', err.message));
+  }
 }
 
 /**
  * Arma el mensaje que se le debe mostrar al cliente según sus órdenes.
  * @param {string} abonado
+ * @param {{ telefono?: string }} [ctx] - número de WhatsApp, para ligar el registro de SLA a la conversación
  * @returns {Promise<string[]>} mensajes a enviar, en orden
  */
-async function checkOrdenStatus(abonado) {
+async function checkOrdenStatus(abonado, ctx = {}) {
   const { ordenes, tipificacion } = await fetchOrdenesYTipificacion(abonado);
   const replies = [];
 
@@ -170,7 +182,7 @@ async function checkOrdenStatus(abonado) {
         replies.push(
           `Tu orden "${orden.detalle_orden}" está por fuera de nuestro tiempo estimado de atención. La vamos a priorizar: será visitada con prioridad 1 en un máximo de 24 horas.`
         );
-        registrarIncumplimientoSLA(abonado, orden);
+        registrarIncumplimientoSLA(abonado, orden, ctx);
       } else if (tiempoHoras) {
         replies.push(
           `Tu orden "${orden.detalle_orden}" está dentro de nuestro tiempo de atención — será atendida en un tiempo máximo de ${tiempoHoras} horas, según su tipo y prioridad.`
@@ -211,4 +223,4 @@ async function getTipificacionInfo(abonado, detalleOrden) {
   };
 }
 
-module.exports = { checkOrdenStatus, getTipificacionInfo };
+module.exports = { checkOrdenStatus, getTipificacionInfo, setRegistroSla };

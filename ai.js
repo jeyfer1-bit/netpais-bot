@@ -121,7 +121,7 @@ async function classifyNovedadWithAI(text) {
         '- sinservicio: no tiene internet en absoluto\n' +
         '- tv: problema con el servicio de televisión\n' +
         '- aplicaciones: problema con una app o página web específica (no carga, no abre)\n' +
-        '- velocidadcontratada: su test de velocidad no corresponde con las megas contratadas\n\n' +
+        '- velocidadcontratada: su test de velocidad no corresponde con las megas contratadas (ej: "no me dan las megas", "no me da la velocidad que pague")\n\n' +
         'Si no puedes clasificarlo con confianza en ninguna de estas categorías, responde exactamente: ninguna',
     },
   ];
@@ -133,4 +133,47 @@ async function classifyNovedadWithAI(text) {
   return NOVEDAD_CATEGORIES.includes(category) ? category : null;
 }
 
-module.exports = { transcribeAudio, describeImage, classifyNovedadWithAI };
+/**
+ * Reescribe un mensaje del bot para que suene más cálido y cercano —
+ * SIN cambiar ningún dato. Esta es la única función de "Nivel 2"
+ * (redacción) del bot: la IA nunca decide qué decir, solo puede
+ * cambiar CÓMO se dice.
+ *
+ * Blindaje obligatorio: se le exigen frases textuales que DEBEN
+ * aparecer tal cual en la reescritura (ej: el nombre exacto de una
+ * orden, un tiempo de atención, un valor en Mbps). Si al verificar
+ * falta alguna, se descarta la reescritura y se devuelve el mensaje
+ * original — nunca se arriesga a que la IA "olvide" o cambie un dato.
+ *
+ * @param {string} message - mensaje original, ya con todos los datos correctos
+ * @param {string[]} criticalPhrases - frases que deben sobrevivir tal cual
+ * @returns {Promise<string>} el mensaje reescrito, o el original si algo falla
+ */
+async function rewriteWarmly(message, criticalPhrases = []) {
+  const parts = [
+    {
+      text:
+        'Reescribe el siguiente mensaje de un bot de soporte técnico de internet para que suene más cálido, cercano y transmita confianza de que el problema se va a resolver. ' +
+        'No cambies ningún dato, número, nombre de orden, ni el sentido del mensaje — solo el tono y la redacción. ' +
+        'Debes conservar EXACTAMENTE, palabra por palabra, estas frases dentro de tu respuesta (no las traduzcas, no las abrevies, no cambies mayúsculas/minúsculas ni tildes):\n' +
+        criticalPhrases.map((p) => `- ${p}`).join('\n') +
+        `\n\nMensaje original:\n"${message}"\n\n` +
+        'Responde ÚNICAMENTE con el mensaje reescrito en español, sin comillas, sin comentarios ni explicaciones adicionales.',
+    },
+  ];
+
+  const rewritten = await callGemini(parts, { maxOutputTokens: 400 });
+  if (!rewritten) return message;
+
+  // Verificación obligatoria: si falta alguna frase crítica tal cual,
+  // no confiamos en la reescritura.
+  const todasPresentes = criticalPhrases.every((phrase) => rewritten.includes(phrase));
+  if (!todasPresentes) {
+    console.warn('⚠️  Reescritura de IA descartada (faltó una frase crítica):', rewritten);
+    return message;
+  }
+
+  return rewritten;
+}
+
+module.exports = { transcribeAudio, describeImage, classifyNovedadWithAI, rewriteWarmly };

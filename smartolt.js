@@ -40,7 +40,7 @@ function getCityFromAbonado(abonado) {
 // (ej: Ibagué tiene 2), así que guardamos un arreglo de API keys.
 // Variables de entorno esperadas, ej. para Ibagué:
 //   SMARTOLT_IBAGUE_URL=https://clancolombia-ibague.smartolt.com
-//   SMARTOLT_IBAGUE_API_KEYS=282956cd46584dd7b56c7d0a5ef937db,af0b3286da1e42acbcfc06148e13e2a5
+//   SMARTOLT_IBAGUE_API_KEYS=<key1>,<key2>   (los valores reales solo en Railway)
 function getCityConfig(city) {
   const envPrefix = `SMARTOLT_${city.toUpperCase()}`;
   const baseUrl = process.env[`${envPrefix}_URL`];
@@ -388,6 +388,7 @@ async function getOnuSignalGraph(abonado, graphType = 'daily') {
 }
 
 module.exports = {
+  getCityFromAbonado,
   getOnuSignal,
   translateStatus,
   translateSignal,

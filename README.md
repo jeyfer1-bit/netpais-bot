@@ -60,3 +60,15 @@ Desde tu WhatsApp (el número que verificaste como destinatario de prueba), mán
 - Reemplazar la función `buildReply()` en `server.js` con tu lógica real de soporte (o conectarla a un LLM).
 - Generar un **token permanente** (System User token) en vez del temporal de 24h, para que el bot no se caiga cada día.
 - Completar la verificación del negocio en Meta y conectar tu número real de WhatsApp (no el de prueba) cuando estés listo para producción.
+
+## Registro de conversaciones (Fase 1 del tablero del bot)
+
+El bot guarda cada conversación, sus mensajes y eventos en el Postgres de `netpais-reporte`
+(tablas `bot_conversaciones`, `bot_mensajes`, `bot_eventos`, `bot_sla_vencidas`; las crea al arrancar).
+
+Variables nuevas en Railway (servicio del bot):
+- `DATABASE_URL`: referencia al Postgres del reporte (`${{Postgres.DATABASE_URL}}`). Sin ella el bot funciona como antes, sin registro.
+- `BOT_ABANDONO_MIN` (opcional, 30 por defecto): minutos sin respuesta del cliente para cerrar la conversación como abandonada.
+
+Cuando el bot transfiere a un asesor, la conversación queda en `esperando_humano` y el bot deja de responder
+(solo registra). Prueba local: `DATABASE_URL=postgres://.../bot_prueba npm test` (nunca contra producción).

@@ -16,25 +16,56 @@ const GRAPH_API_VERSION = 'v21.0';
 const MESSAGES_URL = `https://graph.facebook.com/${GRAPH_API_VERSION}/${PHONE_NUMBER_ID}/messages`;
 const MEDIA_URL = `https://graph.facebook.com/${GRAPH_API_VERSION}/${PHONE_NUMBER_ID}/media`;
 
+// Registro de mensajes salientes. server.js lo conecta a conversaciones.js;
+// así queda guardado TODO lo que sale, incluso lo que flow.js envía directo
+// (ej: gráficas de SmartOLT). Si el registro falla, el envío no se afecta.
+let registro = null;
+let cadena = Promise.resolve(); // los registros se guardan de a uno, en el orden en que salieron
+function setRegistro(fn) {
+  registro = fn;
+}
+function registrar(to, datos) {
+  if (!registro) return;
+  cadena = cadena
+    .then(() => registro(to, datos))
+    .catch((err) => console.error('Error registrando mensaje saliente:', err.message));
+}
+/** Espera a que terminen los registros pendientes (pruebas y apagado). */
+function registrosPendientes() {
+  return cadena;
+}
+
 /**
  * Envía un mensaje de texto plano.
  */
-async function sendTextMessage(to, body) {
-  await axios.post(
-    MESSAGES_URL,
-    {
-      messaging_product: 'whatsapp',
-      to,
-      type: 'text',
-      text: { body },
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-        'Content-Type': 'application/json',
+async function sendTextMessage(to, body, { autor = 'bot', agenteId = null } = {}) {
+  try {
+    const r = await axios.post(
+      MESSAGES_URL,
+      {
+        messaging_product: 'whatsapp',
+        to,
+        type: 'text',
+        text: { body },
       },
-    }
-  );
+      {
+        headers: {
+          Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+    const waId = r.data?.messages?.[0]?.id || null;
+    registrar(to, { autor, agenteId, tipo: 'text', texto: body, waId });
+    return waId;
+  } catch (err) {
+    const detalle = err?.response?.data?.error?.message || err.message;
+    registrar(to, { autor, agenteId, tipo: 'text', texto: body, error: detalle });
+    throw err;
+  }
+  const waId = r.data?.messages?.[0]?.id || null;
+  registrar(to, { autor, agenteId, tipo: 'image', texto: caption || '[imagen]', waId });
+  return waId;
 }
 
 /**
@@ -47,7 +78,7 @@ async function sendTextMessage(to, body) {
  * @param {Buffer} buffer - bytes de la imagen (ej: PNG que devuelve SmartOLT)
  * @param {string} [caption] - texto opcional que acompaña la imagen
  */
-async function sendImageMessage(to, buffer, caption) {
+async function sendImageMessage(to, buffer, caption, { autor = 'bot', agenteId = null } = {}) {
   // 1) Subir el binario a la Media API de WhatsApp
   const form = new FormData();
   form.append('file', buffer, { filename: 'grafico.png', contentType: 'image/png' });
@@ -67,7 +98,7 @@ async function sendImageMessage(to, buffer, caption) {
   }
 
   // 2) Enviar el mensaje de imagen usando ese media_id
-  await axios.post(
+  const r = await axios.post(
     MESSAGES_URL,
     {
       messaging_product: 'whatsapp',
@@ -112,4 +143,4 @@ async function downloadMedia(mediaId) {
   return { buffer: Buffer.from(fileResponse.data), mimeType };
 }
 
-module.exports = { sendTextMessage, sendImageMessage, downloadMedia };
+module.exports = { sendTextMessage, sendImageMessage, downloadMedia, setRegistro, registrosPendientes };

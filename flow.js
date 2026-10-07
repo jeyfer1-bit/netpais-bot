@@ -31,7 +31,7 @@ const {
   buildConfirmationMessage,
   CLARIFYING_MESSAGE,
 } = require('./novedad');
-const { classifyNovedadWithAI } = require('./ai');
+const { classifyNovedadWithAI, rewriteWarmly } = require('./ai');
 const { checkOrdenStatus, getTipificacionInfo } = require('./ordenes');
 
 // sessions: Map<numeroDeWhatsapp, sessionObject>
@@ -98,12 +98,77 @@ function resetSession(phone) {
   sessions.delete(phone);
 }
 
+// ---------------------------------------------------------------
+// Acciones para el registro de conversaciones (conversaciones.js)
+// ---------------------------------------------------------------
+// flow.js no habla con la base de datos: solo anota qué pasó en este
+// turno (transferir, cerrar, eventos) y server.js lo aplica.
+// pendientes: Map<telefono, { accion: null | {...}, eventos: [...] }>
+const pendientes = new Map();
+
+function anotar(phone) {
+  if (!pendientes.has(phone)) pendientes.set(phone, { accion: null, eventos: [] });
+  return pendientes.get(phone);
+}
+
+/**
+ * Pasa la conversación a un humano (cola del portal). Envía un único aviso
+ * al cliente y deja la sesión en blanco: desde aquí el bot guarda silencio
+ * hasta que un agente la cierre o la devuelva al bot.
+ *   cola: mda | administrativo | comercial | servicio_cliente
+ */
+function transferir(phone, replies, cola, motivo, mensaje) {
+  if (mensaje) replies.push(mensaje);
+  const s = sessions.get(phone);
+  anotar(phone).accion = {
+    tipo: 'transferir',
+    cola,
+    motivo,
+    categoria: s?.novedadCategory || null,
+    // Puede transferirse en el mismo turno en que se identificó al cliente
+    cliente: s?.customer ? { abonado: s.customer.abonado, nombre: s.customer.nombre } : null,
+  };
+  resetSession(phone);
+  return replies;
+}
+
+/** Cierra la conversación (ej: el cliente dijo "no, nada más"). */
+function cerrarConversacion(phone, resultado) {
+  anotar(phone).accion = { tipo: 'cerrar', resultado };
+}
+
+/** Lo que pasó en el último turno; se borra al leerlo. */
+function tomarAcciones(phone) {
+  const a = pendientes.get(phone) || { accion: null, eventos: [] };
+  pendientes.delete(phone);
+  return a;
+}
+
+/** Sesión guardada en Postgres → memoria (antes de procesar el mensaje). */
+function cargarSesion(phone, sesion) {
+  if (sesion && typeof sesion === 'object') sessions.set(phone, sesion);
+  else sessions.delete(phone);
+}
+
+/** Sesión en memoria → para guardarla en Postgres (después de procesar). */
+function leerSesion(phone) {
+  return sessions.get(phone) || null;
+}
+
 function normalize(text) {
   return text
     .trim()
     .toLowerCase()
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, ''); // quita acentos: sí -> si
+}
+
+/** "CLAN" / "juan perez" -> "Clan" / "Juan Perez" — para que el nombre
+ * del cliente se sienta más cálido y personal que en MAYÚSCULAS. */
+function toTitleCase(str) {
+  return String(str)
+    .toLowerCase()
+    .replace(/\b\p{L}/gu, (c) => c.toUpperCase());
 }
 
 /**
@@ -224,14 +289,22 @@ function classifyImprovement(text) {
 async function buildCrearOrdenMessage(abonado, detalleOrden) {
   const info = await getTipificacionInfo(abonado, detalleOrden);
 
+  let base;
+  const criticalPhrases = [`"${detalleOrden}"`];
+
   if (!info) {
-    return `Vamos a crear una orden por "${detalleOrden}".`;
+    base = `Vamos a crear una orden por "${detalleOrden}".`;
+  } else {
+    const tipoTexto = info.tipoRevision ? ` de forma ${info.tipoRevision.toLowerCase()}` : '';
+    const tiempoTexto = info.tiempo ? `, la cual será atendida en un máximo de ${info.tiempo}` : '';
+    base = `Vamos a crear una orden por "${detalleOrden}"${tiempoTexto}${tipoTexto ? ',' : ''}${tipoTexto}.`;
+    if (info.tiempo) criticalPhrases.push(info.tiempo);
   }
 
-  const tipoTexto = info.tipoRevision ? ` de forma ${info.tipoRevision.toLowerCase()}` : '';
-  const tiempoTexto = info.tiempo ? `, la cual será atendida en un máximo de ${info.tiempo}` : '';
-
-  return `Vamos a crear una orden por "${detalleOrden}"${tiempoTexto}${tipoTexto ? ',' : ''}${tipoTexto}.`;
+  // Nivel 2 (redacción): la IA solo puede cambiar el tono, nunca el
+  // nombre de la orden ni el tiempo — ambos son frases obligatorias
+  // que rewriteWarmly verifica antes de aceptar la reescritura.
+  return rewriteWarmly(base, criticalPhrases);
 }
 
 // -------- Incidente conocido: entrega de video de Google/YouTube --------
@@ -285,12 +358,15 @@ function classifySpeedTestResult(text, planMbps) {
     t.match(/baj(ada|a)?\D{0,5}(\d+(?:[.,]\d+)?)/) || t.match(/(descarga|download)\D{0,5}(\d+(?:[.,]\d+)?)/);
   if (bajadaMatch && planMbps) {
     const valor = Number(bajadaMatch[2].replace(',', '.'));
-    return valor >= planMbps * SPEED_TEST_TOLERANCE ? 'positivo' : 'negativo';
+    return {
+      resultado: valor >= planMbps * SPEED_TEST_TOLERANCE ? 'positivo' : 'negativo',
+      valorBajada: valor,
+    };
   }
 
   // Caso 2: el cliente responde textualmente si dio bien o mal
-  if (/\bbien\b|\bnormal\b|\bcorrecto\b|\bok\b/.test(t)) return 'positivo';
-  if (/\bmal\b|\bmalo\b|\bincorrecto\b|\bbajo\b|\bpoco\b/.test(t)) return 'negativo';
+  if (/\bbien\b|\bnormal\b|\bcorrecto\b|\bok\b/.test(t)) return { resultado: 'positivo', valorBajada: null };
+  if (/\bmal\b|\bmalo\b|\bincorrecto\b|\bbajo\b|\bpoco\b/.test(t)) return { resultado: 'negativo', valorBajada: null };
 
   return null;
 }
@@ -331,6 +407,10 @@ function classifyValidationConfirm(text) {
  * estado del servicio.
  */
 async function proceedWithCustomer(session, phone, customer, replies) {
+  // Formato más cálido para el nombre: en el Excel suele venir en
+  // MAYÚSCULAS, y "¡Listo, CLAN!" se siente más frío/gritado que
+  // "¡Listo, Clan!".
+  customer.nombre = toTitleCase(customer.nombre);
   session.customer = customer;
   replies.push(`¡Listo, ${customer.nombre}! 🙌 Ya te ubiqué en el sistema.`);
 
@@ -362,12 +442,11 @@ async function proceedWithCustomer(session, phone, customer, replies) {
     replies.push(`Tu servicio está: *${customer.estado}* 🛠️`);
     replies.push('Voy a revisar el estado de tu orden de instalación...');
     try {
-      const ordenReplies = await checkOrdenStatus(customer.abonado);
+      const ordenReplies = await checkOrdenStatus(customer.abonado, { telefono: phone });
       replies.push(...ordenReplies);
     } catch (err) {
       console.error('Error consultando órdenes:', err.message);
-      replies.push('No pude consultar el estado de tu orden en este momento. Te voy a comunicar con un asesor. 🙌');
-      resetSession(phone);
+      transferir(phone, replies, 'servicio_cliente', 'error_consulta_orden', 'No pude consultar el estado de tu orden en este momento. Te voy a comunicar con un asesor. 🙌');
       return replies;
     }
     replies.push('¿Hay algo más en lo que pueda ayudarte? (sí/no)');
@@ -380,21 +459,31 @@ async function proceedWithCustomer(session, phone, customer, replies) {
     replies.push(
       'Para poder brindarte soporte técnico, primero necesitas ponerte al día con tu pago. Una vez lo hagas, escríbenos de nuevo y con gusto te ayudamos.'
     );
-    resetSession(phone);
+    replies.push('¿Hay algo más en lo que pueda ayudarte? (sí/no)');
+    session.step = STEPS.ASK_ANYTHING_ELSE;
     return replies;
   }
 
   if (estado === 'retirado' || estado === 'retirado m') {
     replies.push(`Tu servicio figura como: *${customer.estado}*.`);
-    replies.push('Te voy a comunicar con un asesor para que revise tu caso. 🙌');
-    resetSession(phone);
+    transferir(phone, replies, 'comercial', 'retirado', 'Te voy a comunicar con un asesor para que revise tu caso. 🙌');
     return replies;
+  }
+
+  if (estado === 'castigado') {
+    replies.push(`Tu servicio figura como: *${customer.estado}*.`);
+    return transferir(
+      phone,
+      replies,
+      'administrativo',
+      'castigado',
+      'Te voy a comunicar con un asesor del área administrativa para que revise tu caso. 🙌'
+    );
   }
 
   // Estado no contemplado explícitamente
   replies.push(`Tu servicio está: *${customer.estado}*.`);
-  replies.push('Te voy a comunicar con un asesor para revisar tu caso. 🙌');
-  resetSession(phone);
+  transferir(phone, replies, 'servicio_cliente', 'estado_no_contemplado', 'Te voy a comunicar con un asesor para revisar tu caso. 🙌');
   return replies;
 }
 
@@ -406,7 +495,66 @@ async function proceedWithCustomer(session, phone, customer, replies) {
  */
 const RESET_WORDS = ['#reset'];
 
+// El cliente pide hablar con una persona (en cualquier paso)
+const PIDE_ASESOR_RE = /\b(asesor|asesora|asesores|humano|una persona|persona real|agente|operador|operadora)\b/;
+
+// Respuestas del bot que significan "no te entendí, repite"
+const MAX_SIN_ENTENDER = 3;
+function esAclaracion(reply) {
+  return (
+    reply === CLARIFYING_MESSAGE ||
+    reply.startsWith('Perdón, no entendí') ||
+    reply.startsWith('No logré identificar') ||
+    reply.startsWith('¿Podrías confirmarme') ||
+    reply.startsWith('¿Podrías indicarme') ||
+    reply.startsWith('¿Podrías confirmar')
+  );
+}
+
+/**
+ * Procesa un mensaje entrante y devuelve el/los mensaje(s) de respuesta.
+ * Además de lo que hace el flujo, detecta:
+ *   - el cliente pide un asesor → transferencia a servicio al cliente
+ *   - el bot no le entiende MAX_SIN_ENTENDER veces seguidas → transferencia
+ * Lo que pase (transferir, cerrar, eventos) se lee con tomarAcciones().
+ */
 async function handleMessage(phone, text) {
+  const t = normalize(text);
+
+  if (!RESET_WORDS.includes(t) && PIDE_ASESOR_RE.test(t)) {
+    return transferir(
+      phone,
+      [],
+      'servicio_cliente',
+      'pide_asesor',
+      'Claro 🙌 Te voy a comunicar con un asesor de servicio al cliente. En un momento te escribe por este mismo chat.'
+    );
+  }
+
+  const pasoAntes = sessions.get(phone)?.step ?? null;
+  const replies = await procesar(phone, text);
+  const session = sessions.get(phone);
+
+  if (session && session.step && session.step === pasoAntes && replies.some(esAclaracion)) {
+    session.sinEntender = (session.sinEntender || 0) + 1;
+    anotar(phone).eventos.push({ tipo: 'no_entendido', nota: `${session.step}: ${String(text).slice(0, 200)}` });
+    if (session.sinEntender >= MAX_SIN_ENTENDER) {
+      return transferir(
+        phone,
+        [],
+        'servicio_cliente',
+        'no_entiende',
+        'Perdóname 🙏 no he logrado entenderte bien. Te voy a comunicar con un asesor de servicio al cliente para que te ayude directamente.'
+      );
+    }
+  } else if (session) {
+    session.sinEntender = 0;
+  }
+
+  return replies;
+}
+
+async function procesar(phone, text) {
   const t = text.trim().toLowerCase();
 
   // -------- Palabra clave de reinicio: funciona en cualquier paso --------
@@ -438,10 +586,7 @@ async function handleMessage(phone, text) {
       return replies;
     }
     if (isNegative(text)) {
-      replies.push(
-        'Entiendo. Te voy a comunicar con uno de nuestros asesores para que te ayude a conocer nuestros planes. 🙌'
-      );
-      resetSession(phone);
+      transferir(phone, replies, 'comercial', 'no_cliente', 'Entiendo. Te voy a comunicar con uno de nuestros asesores para que te ayude a conocer nuestros planes. 🙌');
       return replies;
     }
     replies.push('Perdón, no entendí 🙏 ¿Podrías responder con *sí* o *no*? ¿Ya eres cliente de netpaís?');
@@ -462,10 +607,7 @@ async function handleMessage(phone, text) {
       session.idAttempts += 1;
 
       if (session.idAttempts >= MAX_ID_ATTEMPTS) {
-        replies.push(
-          'No logré encontrar tu información después de varios intentos. Te voy a comunicar con un asesor para que te ayude directamente. 🙌'
-        );
-        resetSession(phone);
+        transferir(phone, replies, 'servicio_cliente', 'no_encontrado', 'No logré encontrar tu información después de varios intentos. Te voy a comunicar con un asesor para que te ayude directamente. 🙌');
         return replies;
       }
 
@@ -559,12 +701,11 @@ async function handleMessage(phone, text) {
     if (isAffirmative(text)) {
       if (session.novedadCategory === 'orden') {
         try {
-          const ordenReplies = await checkOrdenStatus(session.customer.abonado);
+          const ordenReplies = await checkOrdenStatus(session.customer.abonado, { telefono: phone });
           replies.push(...ordenReplies);
         } catch (err) {
           console.error('Error consultando órdenes:', err.message);
-          replies.push('No pude consultar el estado de tu orden en este momento. Te voy a comunicar con un asesor. 🙌');
-          resetSession(phone);
+          transferir(phone, replies, 'servicio_cliente', 'error_consulta_orden', 'No pude consultar el estado de tu orden en este momento. Te voy a comunicar con un asesor. 🙌');
           return replies;
         }
         replies.push('¿Hay algo más en lo que pueda ayudarte? (sí/no)');
@@ -582,8 +723,7 @@ async function handleMessage(phone, text) {
         const speedProfile = await getOnuSpeedProfiles(session.customer.abonado);
 
         if (!speedProfile) {
-          replies.push('No pude consultar tu plan contratado en este momento. Te voy a comunicar con un asesor. 🙌');
-          resetSession(phone);
+          transferir(phone, replies, 'mda', 'error_plan_smartolt', 'No pude consultar tu plan contratado en este momento. Te voy a comunicar con un asesor. 🙌');
           return replies;
         }
 
@@ -605,10 +745,7 @@ async function handleMessage(phone, text) {
         const onu = await getOnuSignal(session.customer.abonado);
 
         if (!onu) {
-          replies.push(
-            'No pude validar automáticamente el estado de tu conexión en este momento. Te voy a comunicar con un asesor. 🙌'
-          );
-          resetSession(phone);
+          transferir(phone, replies, 'mda', 'error_smartolt', 'No pude validar automáticamente el estado de tu conexión en este momento. Te voy a comunicar con un asesor. 🙌');
           return replies;
         }
 
@@ -663,8 +800,7 @@ async function handleMessage(phone, text) {
         const onu = await getOnuSignal(session.customer.abonado);
 
         if (!onu) {
-          replies.push('No pude validar automáticamente el estado de tu conexión en este momento. Te voy a comunicar con un asesor. 🙌');
-          resetSession(phone);
+          transferir(phone, replies, 'mda', 'error_smartolt', 'No pude validar automáticamente el estado de tu conexión en este momento. Te voy a comunicar con un asesor. 🙌');
           return replies;
         }
 
@@ -809,8 +945,7 @@ async function handleMessage(phone, text) {
       }
 
       if (!success) {
-        replies.push('No pude enviar el comando de reinicio al equipo en este momento. Te voy a comunicar con un asesor. 🙌');
-        resetSession(phone);
+        transferir(phone, replies, 'mda', 'error_reinicio', 'No pude enviar el comando de reinicio al equipo en este momento. Te voy a comunicar con un asesor. 🙌');
         return replies;
       }
 
@@ -1068,14 +1203,12 @@ async function handleMessage(phone, text) {
     const catvStatus = await getOnuCatvStatus(session.customer.abonado);
 
     if (!catvStatus) {
-      replies.push('No pude validar automáticamente el estado del servicio de televisión en este momento. Te voy a comunicar con un asesor. 🙌');
-      resetSession(phone);
+      transferir(phone, replies, 'mda', 'error_tv', 'No pude validar automáticamente el estado del servicio de televisión en este momento. Te voy a comunicar con un asesor. 🙌');
       return replies;
     }
 
     if (catvStatus === 'unsupported') {
-      replies.push('El equipo asociado a tu servicio no es compatible con TV por este medio. Te voy a comunicar con un asesor para revisar tu caso. 🙌');
-      resetSession(phone);
+      transferir(phone, replies, 'mda', 'tv_ont_incompatible', 'El equipo asociado a tu servicio no es compatible con TV por este medio. Te voy a comunicar con un asesor para revisar tu caso. 🙌');
       return replies;
     }
 
@@ -1090,8 +1223,7 @@ async function handleMessage(phone, text) {
       }
 
       if (!success) {
-        replies.push('No pude encender el puerto de televisión en este momento. Te voy a comunicar con un asesor. 🙌');
-        resetSession(phone);
+        transferir(phone, replies, 'mda', 'error_tv_puerto', 'No pude encender el puerto de televisión en este momento. Te voy a comunicar con un asesor. 🙌');
         return replies;
       }
 
@@ -1242,16 +1374,23 @@ async function handleMessage(phone, text) {
 
   // -------- Flujo velocidad: resultado del test --------
   if (session.step === STEPS.NOV_SPEED_ASK_RESULT) {
-    const result = classifySpeedTestResult(text, session.novPlanMbps);
+    const speedResult = classifySpeedTestResult(text, session.novPlanMbps);
 
-    if (!result) {
+    if (!speedResult) {
       replies.push(
         'Cuéntame el resultado de tu test de velocidad — puedes decirme si dio bien o mal, o el valor de bajada en Mbps (ej: "bajada 45 Mbps").'
       );
       return replies;
     }
 
-    if (result === 'positivo') {
+    // Siempre confirmamos qué entendimos antes de seguir, sobre todo
+    // importante cuando el cliente mandó una foto: así sabe que el
+    // bot sí "vio" su pantallazo y no está ignorándolo.
+    if (speedResult.valorBajada !== null) {
+      replies.push(`Vemos que el resultado de bajada de tu prueba fue de ${speedResult.valorBajada} Mbps.`);
+    }
+
+    if (speedResult.resultado === 'positivo') {
       replies.push(
         'Recuerda que puede haber una variación de hasta -10% por temas de interferencias o consumo de ancho de banda de apps en segundo plano, y aun así se considera un resultado satisfactorio. Con base en eso, tu resultado está dentro de lo esperado. 🙌'
       );
@@ -1260,7 +1399,7 @@ async function handleMessage(phone, text) {
       return replies;
     }
 
-    // result === 'negativo'
+    // resultado === 'negativo'
     if (session.novSpeedMethod === 'wifi') {
       replies.push(
         'Entiendo. Como la prueba se hizo por WiFi, te recomiendo repetirla desde un computador conectado por cable ethernet apenas puedas — eso nos da un resultado más confiable. Cuando la tengas, escríbenos de nuevo y te acompañamos otra vez con gusto. 🙌'
@@ -1325,6 +1464,17 @@ async function handleMessage(phone, text) {
 
   // -------- Paso: ¿necesita algo más tras consultar la orden? --------
   if (session.step === STEPS.ASK_ANYTHING_ELSE) {
+    if (isAffirmative(text) && String(session.customer?.estado || '').toLowerCase() === 'cortado') {
+      // Con el servicio cortado no hay soporte técnico: lo que necesite es del área administrativa
+      return transferir(
+        phone,
+        replies,
+        'administrativo',
+        'cortado',
+        'Claro 🙌 Como tu servicio está cortado, te voy a comunicar con un asesor del área administrativa para que te ayude con tu pago o tu consulta.'
+      );
+    }
+
     if (isAffirmative(text)) {
       // Vuelve directo a pedir la novedad, sin repetir la identificación
       // del cliente ni ninguna otra validación: session.customer ya está guardado.
@@ -1345,8 +1495,9 @@ async function handleMessage(phone, text) {
 
     if (isNegative(text)) {
       replies.push(
-        'Perfecto, procedo a cerrar el chat. Gracias por contactarte con netpaís 🙌 Si necesitas algo más, escríbenos de nuevo cuando quieras. 👋'
+        `Gracias por contactarte con netpaís${session.customer?.nombre ? `, ${session.customer.nombre}` : ''} 🙌 Fue un gusto ayudarte. Si necesitas algo más, aquí estaremos. 👋`
       );
+      cerrarConversacion(phone, 'resuelta_bot');
       resetSession(phone); // solo deja la sesión lista para una nueva interacción; no la inicia
       return replies;
     }
@@ -1361,4 +1512,4 @@ async function handleMessage(phone, text) {
   return replies;
 }
 
-module.exports = { handleMessage };
+module.exports = { handleMessage, tomarAcciones, cargarSesion, leerSesion, STEPS };
