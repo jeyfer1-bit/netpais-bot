@@ -205,7 +205,7 @@ async function atender(message) {
         await conv.transferir(c.id, accion.cola, accion.motivo);
         console.log(`🙋 ${from} transferido a ${accion.cola} (${accion.motivo})`);
       } else if (accion?.tipo === 'cerrar') {
-        await conv.cerrar(c.id, accion.resultado);
+        await conv.cerrar(c.id, accion.resultado, { pedirCalificacion: accion.pedirCalificacion });
       }
       flow.cargarSesion(from, null); // ya quedó en Postgres; no hace falta en memoria
     } catch (err) {

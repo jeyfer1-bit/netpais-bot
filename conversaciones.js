@@ -133,13 +133,14 @@ async function transferir(convId, cola, motivo) {
   await evento(convId, 'transferida', { aCola: cola, nota: motivo, usuario: 'bot' });
 }
 
-async function cerrar(convId, resultado, { usuario = 'bot', nota = null } = {}) {
+async function cerrar(convId, resultado, { usuario = 'bot', nota = null, pedirCalificacion = false } = {}) {
   if (!db.activa() || !convId) return;
   await db.query(
     `UPDATE bot_conversaciones SET estado = 'cerrada', resultado = $2, cerrada_en = now(),
+            calificacion_pedida_en = CASE WHEN $3 THEN now() ELSE calificacion_pedida_en END,
             sesion = CASE WHEN sesion IS NULL THEN NULL ELSE jsonb_build_object('step', sesion->'step') END
       WHERE id = $1`,
-    [convId, resultado]
+    [convId, resultado, Boolean(pedirCalificacion)]
   );
   await evento(convId, 'cerrada', { nota: nota || resultado, usuario });
 }

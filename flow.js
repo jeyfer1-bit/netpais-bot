@@ -133,8 +133,8 @@ function transferir(phone, replies, cola, motivo, mensaje) {
 }
 
 /** Cierra la conversación (ej: el cliente dijo "no, nada más"). */
-function cerrarConversacion(phone, resultado) {
-  anotar(phone).accion = { tipo: 'cerrar', resultado };
+function cerrarConversacion(phone, resultado, { pedirCalificacion = false } = {}) {
+  anotar(phone).accion = { tipo: 'cerrar', resultado, pedirCalificacion };
 }
 
 /** Lo que pasó en el último turno; se borra al leerlo. */
@@ -1497,7 +1497,9 @@ async function procesar(phone, text) {
       replies.push(
         `Gracias por contactarte con netpaís${session.customer?.nombre ? `, ${session.customer.nombre}` : ''} 🙌 Fue un gusto ayudarte. Si necesitas algo más, aquí estaremos. 👋`
       );
-      cerrarConversacion(phone, 'resuelta_bot');
+      // Encuesta de satisfacción: la respuesta (1 a 5) la captura server.js aunque la conversación ya esté cerrada
+      replies.push('¿Cómo calificarías la atención que recibiste? Respóndenos con un número del 1 al 5 ⭐ (1 = muy mala, 5 = excelente).');
+      cerrarConversacion(phone, 'resuelta_bot', { pedirCalificacion: true });
       resetSession(phone); // solo deja la sesión lista para una nueva interacción; no la inicia
       return replies;
     }
