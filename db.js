@@ -62,6 +62,9 @@ async function migrar() {
     CREATE UNIQUE INDEX IF NOT EXISTS bot_conv_abierta ON bot_conversaciones (telefono) WHERE estado <> 'cerrada';
     CREATE INDEX IF NOT EXISTS bot_conv_estado ON bot_conversaciones (estado, cola);
     CREATE INDEX IF NOT EXISTS bot_conv_creada ON bot_conversaciones (creada_en);
+    -- Fase 3: desde cuándo espera en su cola actual (se reinicia al reasignar)
+    ALTER TABLE bot_conversaciones ADD COLUMN IF NOT EXISTS en_cola_desde TIMESTAMPTZ;
+    CREATE INDEX IF NOT EXISTS bot_conv_agente ON bot_conversaciones (agente_id) WHERE estado = 'con_humano';
 
     CREATE TABLE IF NOT EXISTS bot_mensajes (
       id BIGSERIAL PRIMARY KEY,

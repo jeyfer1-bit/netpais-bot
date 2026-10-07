@@ -126,7 +126,7 @@ async function transferir(convId, cola, motivo) {
   await db.query(
     `UPDATE bot_conversaciones SET
        estado = 'esperando_humano', resultado = 'transferida', cola = $2,
-       motivo_transferencia = $3, transferida_en = now()
+       motivo_transferencia = $3, transferida_en = now(), en_cola_desde = now(), agente_id = NULL
      WHERE id = $1`,
     [convId, cola, motivo]
   );

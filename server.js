@@ -208,6 +208,11 @@ async function atender(message) {
 }
 
 // ---------------------------------------------------------------
+// 3) Envío de mensajes de asesores desde el portal (Fase 3)
+// ---------------------------------------------------------------
+app.use('/internal', require('./internal').crear());
+
+// ---------------------------------------------------------------
 app.get('/', (_req, res) => {
   res.send('Bot de WhatsApp activo ✅');
 });
