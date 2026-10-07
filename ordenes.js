@@ -2,9 +2,12 @@
 //
 // Consulta el estado de las órdenes de un cliente, llamando a un
 // flujo de Power Automate ("Buscar Ordenes netpais-bot") que:
-//   1) Filtra la tabla de Órdenes (TablaOrdenes) por nro_abonado
-//   2) Devuelve también la tabla completa de Tipificación (es
-//      pequeña, se manda entera cada vez)
+//   1) Consulta 'Ordenes SAEPLUS' en el modelo de Power BI (DAX) por
+//      nro_abonado — últimos 3 meses, sin los tipos administrativos
+//   2) Devuelve también la tabla completa de Tipificación (sigue en
+//      Excel; es pequeña, se manda entera cada vez)
+// El abonado pasa por limpiarId() antes de ir al flujo, porque termina
+// dentro de la consulta DAX.
 //
 // Columnas reales:
 //   Órdenes: nro_orden, nro_abonado, detalle_orden, estatus_orden,
@@ -14,6 +17,7 @@
 //            "Tipo de revisión", Tiempo (ej: "24 horas")
 
 const axios = require('axios');
+const { limpiarId } = require('./customerLookup');
 
 const OPEN_STATES = ['CREADA', 'IMPRESA'];
 
@@ -29,6 +33,11 @@ function sleep(ms) {
 }
 
 async function callFlow(abonado) {
+  const id = limpiarId(abonado);
+  if (!id) {
+    throw new Error(`Abonado no válido para consultar órdenes: "${String(abonado).slice(0, 40)}"`);
+  }
+
   const flowUrl = process.env.POWER_AUTOMATE_ORDENES_URL;
   if (!flowUrl) {
     throw new Error('Falta la variable de entorno POWER_AUTOMATE_ORDENES_URL');
@@ -36,7 +45,7 @@ async function callFlow(abonado) {
 
   const response = await axios.post(
     flowUrl,
-    { abonado: String(abonado).trim() },
+    { abonado: id },
     { headers: { 'Content-Type': 'application/json' } }
   );
 
