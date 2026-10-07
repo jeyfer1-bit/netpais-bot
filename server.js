@@ -98,6 +98,17 @@ async function atender(message) {
   let c = null; // conversación abierta (null si no hay base de datos o falló)
   if (db.activa()) {
     try {
+      // ¿Está respondiendo la calificación de 1 a 5 que se le pidió al cerrar?
+      const pend = await conv.calificacionPendiente(from);
+      const nota = type === 'text' ? String(textoOriginal).trim().match(/^([1-5])(\s*(⭐|estrellas?))?[.!]?$/i) : null;
+      if (pend && nota) {
+        const nuevo = await conv.registrarEntrante(pend, { tipo: type, texto: textoOriginal, waId });
+        if (!nuevo) return;
+        await conv.calificar(pend.id, Number(nota[1]));
+        await sendTextMessage(from, '¡Gracias por tu calificación! 🙌 Nos ayuda a mejorar. Si necesitas algo más, escríbenos cuando quieras.');
+        return;
+      }
+
       c = await conv.obtenerOCrear(from);
       const nuevo = await conv.registrarEntrante(c, { tipo: type, texto: textoOriginal, mediaId, waId });
       if (!nuevo) {
@@ -232,6 +243,14 @@ async function arrancar() {
         .then((n) => n && console.log(`🕓 ${n} conversación(es) cerradas por abandono`))
         .catch((err) => console.error('Error cerrando abandonadas:', err.message));
     }, 5 * 60 * 1000).unref();
+
+    // Retención de datos personales: una vez al día (y 1 minuto después de arrancar)
+    const retener = () => conv
+      .aplicarRetencion()
+      .then((n) => n && console.log(`🧹 ${n} conversación(es) anonimizadas por retención (${conv.RETENCION_MESES} meses)`))
+      .catch((err) => console.error('Error aplicando retención:', err.message));
+    setTimeout(retener, 60 * 1000).unref();
+    setInterval(retener, 24 * 60 * 60 * 1000).unref();
   }
 
   app.listen(PORT, () => {

@@ -136,7 +136,9 @@ async function transferir(convId, cola, motivo) {
 async function cerrar(convId, resultado, { usuario = 'bot', nota = null } = {}) {
   if (!db.activa() || !convId) return;
   await db.query(
-    `UPDATE bot_conversaciones SET estado = 'cerrada', resultado = $2, cerrada_en = now() WHERE id = $1`,
+    `UPDATE bot_conversaciones SET estado = 'cerrada', resultado = $2, cerrada_en = now(),
+            sesion = CASE WHEN sesion IS NULL THEN NULL ELSE jsonb_build_object('step', sesion->'step') END
+      WHERE id = $1`,
     [convId, resultado]
   );
   await evento(convId, 'cerrada', { nota: nota || resultado, usuario });
@@ -154,12 +156,13 @@ async function evento(convId, tipo, { deCola = null, aCola = null, deAgente = nu
 /**
  * Cierra como "abandonada" las conversaciones que siguen con el bot pero en
  * las que el cliente no escribe hace más de BOT_ABANDONO_MIN minutos.
- * La sesión se conserva en la fila (sirve para saber en qué paso se quedó).
+ * De la sesión solo queda el paso en que se quedó (sin cédula ni datos del cliente).
  */
 async function cerrarAbandonadas(minutos = ABANDONO_MIN) {
   if (!db.activa()) return 0;
   const r = await db.query(
-    `UPDATE bot_conversaciones SET estado = 'cerrada', resultado = 'abandonada', cerrada_en = now()
+    `UPDATE bot_conversaciones SET estado = 'cerrada', resultado = 'abandonada', cerrada_en = now(),
+            sesion = CASE WHEN sesion IS NULL THEN NULL ELSE jsonb_build_object('step', sesion->'step') END
      WHERE estado = 'bot' AND COALESCE(ultimo_mensaje_cliente_en, creada_en) < now() - make_interval(mins => $1)
      RETURNING id`,
     [minutos]
@@ -191,7 +194,73 @@ async function registrarSlaVencida({ abonado, orden, telefono, localidad }) {
   );
 }
 
+// ---------------------------------------------------------------
+// Calificación 1-5 (Fase 5)
+// ---------------------------------------------------------------
+const CALIF_MIN = Number(process.env.BOT_CALIFICACION_MIN || 60); // minutos para responder la calificación
+
+/** Conversación recién cerrada por un asesor que espera calificación (o null). */
+async function calificacionPendiente(telefono) {
+  if (!db.activa()) return null;
+  const r = await db.query(
+    `SELECT c.* FROM bot_conversaciones c
+      WHERE c.telefono = $1 AND c.estado = 'cerrada' AND c.calificacion IS NULL
+        AND c.calificacion_pedida_en > now() - make_interval(mins => $2)
+        AND NOT EXISTS (SELECT 1 FROM bot_conversaciones o WHERE o.telefono = $1 AND o.estado <> 'cerrada')
+      ORDER BY c.id DESC LIMIT 1`,
+    [telefono, CALIF_MIN]
+  );
+  return r.rows[0] || null;
+}
+
+async function calificar(convId, nota) {
+  await db.query(`UPDATE bot_conversaciones SET calificacion = $2 WHERE id = $1`, [convId, nota]);
+  await evento(convId, 'calificada', { nota: String(nota), usuario: 'cliente' });
+}
+
+// ---------------------------------------------------------------
+// Retención de datos personales (Ley 1581) — Fase 5
+// ---------------------------------------------------------------
+// Pasados BOT_RETENCION_MESES (12 por defecto) desde el cierre, se borran los mensajes y las notas,
+// y la conversación queda anónima (sin teléfono, nombre, abonado ni sesión). Se conservan solo los
+// datos que alimentan las métricas: fechas, estado, resultado, cola, motivo, categoría, localidad,
+// asesor y calificación. Corre una vez al día y por lotes, para no cargar la base.
+const RETENCION_MESES = Number(process.env.BOT_RETENCION_MESES || 12);
+
+async function aplicarRetencion({ meses = RETENCION_MESES, lote = 500 } = {}) {
+  if (!db.activa() || !(meses > 0)) return 0;
+  let total = 0;
+  for (let i = 0; i < 50; i++) { // máximo 25.000 por corrida
+    const ids = (await db.query(
+      `SELECT id FROM bot_conversaciones
+        WHERE estado = 'cerrada' AND anonimizada_en IS NULL AND cerrada_en < now() - make_interval(months => $1)
+        ORDER BY id LIMIT $2`,
+      [meses, lote]
+    )).rows.map((x) => x.id);
+    if (!ids.length) break;
+    await db.query(`DELETE FROM bot_mensajes WHERE conversacion_id = ANY($1)`, [ids]);
+    await db.query(`UPDATE bot_eventos SET nota = NULL WHERE conversacion_id = ANY($1) AND tipo IN ('nota', 'no_entendido', 'reasignada', 'cerrada', 'devuelta')`, [ids]);
+    await db.query(`DELETE FROM bot_eventos WHERE conversacion_id = ANY($1) AND tipo = 'consultada'`, [ids]);
+    await db.query(
+      `UPDATE bot_conversaciones SET telefono = 'anon-' || id, cliente_nombre = NULL, abonado = NULL, sesion = NULL,
+              anonimizada_en = now()
+        WHERE id = ANY($1)`,
+      [ids]
+    );
+    total += ids.length;
+  }
+  await db.query(
+    `DELETE FROM bot_sla_vencidas WHERE ultima_en < now() - make_interval(months => $1)`,
+    [meses]
+  );
+  return total;
+}
+
 module.exports = {
+  calificacionPendiente,
+  calificar,
+  aplicarRetencion,
+  RETENCION_MESES,
   ESTADOS_SILENCIO,
   COLAS,
   ABANDONO_MIN,

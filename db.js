@@ -65,6 +65,10 @@ async function migrar() {
     -- Fase 3: desde cuándo espera en su cola actual (se reinicia al reasignar)
     ALTER TABLE bot_conversaciones ADD COLUMN IF NOT EXISTS en_cola_desde TIMESTAMPTZ;
     CREATE INDEX IF NOT EXISTS bot_conv_agente ON bot_conversaciones (agente_id) WHERE estado = 'con_humano';
+    -- Fase 5: calificación 1-5 que se pide al cerrar un asesor, y anonimización por retención (Ley 1581)
+    ALTER TABLE bot_conversaciones ADD COLUMN IF NOT EXISTS calificacion_pedida_en TIMESTAMPTZ;
+    ALTER TABLE bot_conversaciones ADD COLUMN IF NOT EXISTS anonimizada_en TIMESTAMPTZ;
+    CREATE INDEX IF NOT EXISTS bot_conv_cerrada_en ON bot_conversaciones (cerrada_en) WHERE anonimizada_en IS NULL;
 
     CREATE TABLE IF NOT EXISTS bot_mensajes (
       id BIGSERIAL PRIMARY KEY,

@@ -72,3 +72,9 @@ Variables nuevas en Railway (servicio del bot):
 
 Cuando el bot transfiere a un asesor, la conversación queda en `esperando_humano` y el bot deja de responder
 (solo registra). Prueba local: `DATABASE_URL=postgres://.../bot_prueba npm test` (nunca contra producción).
+
+### Fase 5
+- Calificación 1–5: si el asesor cerró pidiendo calificación y el cliente responde un número del 1 al 5 dentro de
+  `BOT_CALIFICACION_MIN` (60 min), se guarda en la conversación cerrada y no se abre una nueva.
+- Retención (Ley 1581): una vez al día anonimiza las conversaciones cerradas hace más de `BOT_RETENCION_MESES` (12):
+  borra mensajes y notas, y quita teléfono, nombre, abonado y sesión. Al cerrar, la sesión solo guarda el paso (sin cédula).
