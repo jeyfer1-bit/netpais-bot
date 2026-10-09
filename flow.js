@@ -487,7 +487,8 @@ async function proceedWithCustomer(session, phone, customer, replies) {
     // -------- ¿Hay una falla masiva o ventana de mantenimiento que lo afecte? --------
     const evento = await eventosRed.eventoParaAbonado(customer.abonado);
     if (evento) {
-      replies.push(...eventosRed.mensajesCliente(evento));
+      const onuEnLinea = Boolean(onu) && String(onu.status).toLowerCase() === 'online';
+      replies.push(...eventosRed.mensajesCliente(evento, { enLinea: onuEnLinea }));
       session.eventoRedId = evento.id;
       anotar(phone).eventos.push({
         tipo: 'falla_masiva_informada',

@@ -235,12 +235,22 @@ function horasTxt(h) {
   return h === 1 ? '1 hora' : `${Number.isInteger(h) ? h : h.toFixed(1)} horas`;
 }
 
-/** Mensajes para el cliente afectado. */
-function mensajesCliente(ev) {
+/**
+ * Mensajes para el cliente afectado.
+ * @param {object} ev - fila de bot_eventos_red
+ * @param {{ enLinea?: boolean }} [opts] - si la ONU del cliente se ve en línea ahora,
+ *   el aviso no afirma que su servicio esté caído (evita contradecir el estado que se acaba de mostrar)
+ */
+function mensajesCliente(ev, { enLinea = false } = {}) {
   const ciudad = CIUDADES[ev.ciudad] ? ` de ${CIUDADES[ev.ciudad]}` : '';
   const servicio = afectacionTxt(ev.afectacion);
   const msgs = [];
-  if (ev.tipo === 'falla_masiva') {
+  if (enLinea) {
+    msgs.push(
+      `${ev.tipo === 'falla_masiva' ? `⚠️ Estamos atendiendo una falla masiva en tu sector${ciudad}` : `🛠️ Estamos haciendo un mantenimiento en la red de tu sector${ciudad}`}` +
+        `${ev.radicado ? ` (radicado *${ev.radicado}*)` : ''}. Por ahora tu equipo se ve en línea; si estás presentando fallas en el servicio de ${servicio}, pueden estar relacionadas con este trabajo.`
+    );
+  } else if (ev.tipo === 'falla_masiva') {
     msgs.push(
       `⚠️ En este momento tenemos una falla masiva en tu sector${ciudad} que afecta el servicio de ${servicio}. ` +
         `Nuestro equipo técnico ya está trabajando en la solución${ev.radicado ? ` (radicado *${ev.radicado}*)` : ''}.`
