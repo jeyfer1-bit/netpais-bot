@@ -38,6 +38,7 @@ const {
 const { classifyNovedadWithAI, rewriteWarmly } = require('./ai');
 const { checkOrdenStatus, getTipificacionInfo } = require('./ordenes');
 const wifiCompat = require('./wifiCompat');
+const eventosRed = require('./eventosRed');
 
 // sessions: Map<numeroDeWhatsapp, sessionObject>
 const sessions = new Map();
@@ -79,6 +80,9 @@ const STEPS = {
   SIN_ASK_LED_RED: 'SIN_ASK_LED_RED', // ¿ve algún LED en rojo?
   SIN_ASK_SERVICE_NOW: 'SIN_ASK_SERVICE_NOW', // sin LED rojo: ¿ya tiene servicio?
   SIN_ASK_PERSISTS_AFTER_VALIDATIONS: 'SIN_ASK_PERSISTS_AFTER_VALIDATIONS', // el sistema muestra servicio activo: ¿persiste la falla?
+
+  // Falla masiva / ventana de mantenimiento en el sector del cliente
+  FALLA_ASK_RELACION: 'FALLA_ASK_RELACION', // ¿tu novedad es por esta falla?
 
   // Flujo: cambio de contraseña WiFi
   WIFI_ASK_BAND: 'WIFI_ASK_BAND', // ¿2,4 GHz, 5 GHz o ambas?
@@ -478,6 +482,19 @@ async function proceedWithCustomer(session, phone, customer, replies) {
       replies.push(
         'No pude validar automáticamente el estado de tu conexión en este momento, pero seguimos con tu solicitud.'
       );
+    }
+
+    // -------- ¿Hay una falla masiva o ventana de mantenimiento que lo afecte? --------
+    const evento = await eventosRed.eventoParaAbonado(customer.abonado);
+    if (evento) {
+      replies.push(...eventosRed.mensajesCliente(evento));
+      session.eventoRedId = evento.id;
+      anotar(phone).eventos.push({
+        tipo: 'falla_masiva_informada',
+        nota: `${evento.tipo === 'falla_masiva' ? 'Falla masiva' : 'Ventana'}${evento.radicado ? ` ${evento.radicado}` : ''}: ${evento.titulo || evento.clave}`.slice(0, 300),
+      });
+      session.step = STEPS.FALLA_ASK_RELACION;
+      return replies;
     }
 
     replies.push('¿Qué tipo de novedad presentas?');
@@ -1570,6 +1587,25 @@ async function procesar(phone, text) {
   }
 
   // -------- Paso: ¿necesita algo más tras consultar la orden? --------
+  // -------- Falla masiva en su sector: ¿su novedad es por eso? --------
+  if (session.step === STEPS.FALLA_ASK_RELACION) {
+    if (isAffirmative(text)) {
+      replies.push(
+        'Gracias por tu paciencia 🙏 Tu caso ya está incluido en el reporte, así que no es necesario crear una orden: cuando terminemos el trabajo, tu servicio debería volver a funcionar sin que tengas que hacer nada.'
+      );
+      replies.push('¿Hay algo más en lo que pueda ayudarte? (sí/no)');
+      session.step = STEPS.ASK_ANYTHING_ELSE;
+      return replies;
+    }
+    if (isNegative(text)) {
+      replies.push('Entendido, revisemos tu caso 🙂 ¿Qué tipo de novedad presentas?');
+      session.step = STEPS.ASK_REQUIREMENT;
+      return replies;
+    }
+    replies.push('¿Podrías confirmarme con un *sí* o un *no*? ¿Tu novedad está relacionada con el trabajo que estamos haciendo en tu sector?');
+    return replies;
+  }
+
   // -------- Cambio de contraseña WiFi: ¿qué banda? --------
   if (session.step === STEPS.WIFI_ASK_BAND) {
     const bandas = classifyWifiBand(text);

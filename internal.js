@@ -12,6 +12,7 @@ const crypto = require('crypto');
 const express = require('express');
 const db = require('./db');
 const { sendTextMessage } = require('./whatsapp');
+const eventosRed = require('./eventosRed');
 
 const VENTANA_MS = 24 * 60 * 60 * 1000;
 const MAX_POR_MIN = 30; // mensajes por asesor por minuto
@@ -42,6 +43,42 @@ function crear() {
     if (!igual(req.get('X-Bot-Secret'), secreto)) return res.status(403).json({ error: 'No autorizado' });
     if (!db.activa()) return res.status(503).json({ error: 'El bot no tiene base de datos' });
     next();
+  });
+
+  // Fallas masivas / ventanas de mantenimiento: lo llama el flujo de Power Automate
+  // "Eventos de red MDA" con cada correo de MDA.
+  //   Cuerpo: { id, asunto, remitente, fecha, cuerpo (HTML), adjuntos: [{ nombre, contenido (base64) }] }
+  r.post('/eventos-red', async (req, res) => {
+    const b = req.body || {};
+    if (!b.asunto) return res.status(400).json({ error: 'Falta el asunto del correo' });
+    try {
+      const { accion, evento } = await eventosRed.registrarCorreo({
+        id: b.id || null,
+        asunto: String(b.asunto),
+        cuerpo: String(b.cuerpo || ''),
+        adjuntos: Array.isArray(b.adjuntos) ? b.adjuntos : [],
+      });
+      console.log(`📢 Evento de red (${accion}): ${b.asunto}${evento ? ` — ${evento.abonados?.length || 0} abonados, tiempo: ${evento.tiempo_txt || 'N/D'}` : ''}`);
+      return res.json({
+        ok: true,
+        accion,
+        evento: evento
+          ? { id: evento.id, tipo: evento.tipo, estado: evento.estado, ciudad: evento.ciudad, radicado: evento.radicado,
+              tiempo: evento.tiempo_txt, abonados: evento.abonados?.length || 0, puerto: evento.olt != null ? `OLT ${evento.olt} / ${evento.board} / ${evento.puerto}` : null }
+          : null,
+      });
+    } catch (err) {
+      console.error('Error registrando evento de red:', err.message);
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  r.get('/eventos-red', async (_req, res) => {
+    try {
+      return res.json({ abiertos: await eventosRed.listarAbiertos() });
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
+    }
   });
 
   r.post('/send', async (req, res) => {

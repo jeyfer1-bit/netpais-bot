@@ -131,6 +131,32 @@ async function migrar() {
       creado_en TIMESTAMPTZ NOT NULL DEFAULT now()
     );
     CREATE INDEX IF NOT EXISTS bot_wifi_modelo ON bot_wifi_intentos (modelo, banda);
+
+    -- Fallas masivas y ventanas de mantenimiento (correos de MDA vía Power Automate).
+    CREATE TABLE IF NOT EXISTS bot_eventos_red (
+      id BIGSERIAL PRIMARY KEY,
+      clave TEXT NOT NULL UNIQUE,             -- asunto normalizado, sin RE:/RV:
+      asunto TEXT,
+      tipo TEXT NOT NULL,                     -- falla_masiva | ventana
+      titulo TEXT,
+      ciudad TEXT,                            -- ibague | ladorada | puertosalgar | villadelrosario | lospatios
+      zona TEXT,
+      olt INTEGER, board INTEGER, puerto INTEGER,   -- ventanas por puerto PON
+      afectacion TEXT,
+      tiempo_txt TEXT,
+      horas_estimadas NUMERIC,
+      fecha_txt TEXT,
+      descripcion TEXT,
+      radicado TEXT,
+      usuarios INTEGER,
+      abonados TEXT[] NOT NULL DEFAULT '{}',
+      estado TEXT NOT NULL DEFAULT 'abierto', -- abierto | cerrado
+      ultimo_correo_id TEXT,
+      abierto_en TIMESTAMPTZ NOT NULL DEFAULT now(),
+      actualizado_en TIMESTAMPTZ NOT NULL DEFAULT now(),
+      cerrado_en TIMESTAMPTZ
+    );
+    CREATE INDEX IF NOT EXISTS bot_eventos_red_estado ON bot_eventos_red (estado, actualizado_en);
   `);
   console.log('🗄️ Tablas del bot listas en Postgres');
 }

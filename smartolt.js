@@ -66,6 +66,10 @@ async function refreshCityOnuList(city) {
           name: onu.name || '',
           externalId: onu.unique_external_id || onu.sn,
           apiKey,
+          // Ubicación en la red, para cruzar con ventanas de mantenimiento por puerto PON
+          oltName: onu.olt_name || '',
+          board: onu.board != null ? Number(onu.board) : null,
+          port: onu.port != null ? Number(onu.port) : null,
         }))
       );
     } catch (err) {
@@ -487,7 +491,17 @@ async function cambiarClaveWifi(abonado, banda, password, puertos = {}) {
   return { ok, respuesta, puerto, ssidConservado };
 }
 
+/** OLT, board y puerto PON de la ONU de un abonado (de la lista cacheada). */
+async function ubicacionOnu(abonado) {
+  const city = getCityFromAbonado(abonado);
+  if (!city) return null;
+  const match = findOnuInList(await getCityOnuList(city), abonado);
+  if (!match) return null;
+  return { city, oltName: match.oltName, board: match.board, port: match.port };
+}
+
 module.exports = {
+  ubicacionOnu,
   revisarCambioWifi,
   cambiarClaveWifi,
   ubicarOnu,

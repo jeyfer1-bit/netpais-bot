@@ -18,7 +18,11 @@ const db = require('./db');
 const conv = require('./conversaciones');
 
 const app = express();
-app.use(express.json());
+// Los correos de fallas masivas traen adjuntos (Excel en base64): ese endpoint
+// acepta cuerpos más grandes; el resto (webhook de Meta, etc.) sigue en 100 kb.
+const jsonNormal = express.json();
+const jsonGrande = express.json({ limit: '15mb' });
+app.use((req, res, next) => (req.path === '/internal/eventos-red' ? jsonGrande : jsonNormal)(req, res, next));
 
 const {
   VERIFY_TOKEN,       // el mismo valor que vas a poner en el panel de Meta
