@@ -19,7 +19,9 @@ const { ubicacionOnu } = require('./smartolt');
 
 const VENCE_HORAS = 48;
 const HORAS_POR_DEFECTO = 4;
-const ABONADO_RE = /^(IBA|DOR|PTO|VDR|LP)\d{3,}$/i;
+// El Excel de MDA (exportado de SmartOLT) trae celdas como
+// "VDR007930 - 88234143 - PASTOR ORTIZ ACUNA": se busca el abonado DENTRO de cada celda.
+const ABONADO_EN_TEXTO_RE = /\b(IBA|DOR|PTO|VDR|LP)\d{3,}\b/gi;
 
 const CIUDADES = {
   ibague: 'Ibagué',
@@ -82,8 +84,7 @@ function abonadosDeAdjuntos(adjuntos = []) {
         const filas = XLSX.utils.sheet_to_json(libro.Sheets[hoja], { header: 1, raw: false });
         for (const fila of filas) {
           for (const celda of fila || []) {
-            const v = String(celda || '').trim().toUpperCase();
-            if (ABONADO_RE.test(v)) encontrados.add(v);
+            for (const m of String(celda || '').toUpperCase().matchAll(ABONADO_EN_TEXTO_RE)) encontrados.add(m[0]);
           }
         }
       }
