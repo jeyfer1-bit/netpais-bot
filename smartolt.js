@@ -150,9 +150,9 @@ async function getOnuSignal(abonado) {
 function translateStatus(status) {
   const map = {
     online: 'en línea',
-    offline: 'sin conexión de fibra óptica',
-    'power fail': 'sin conexión a energía eléctrica',
-    los: 'sin conexión de energía y fibra óptica',
+    offline: 'desconectado',
+    'power fail': 'sin energía eléctrica',
+    los: 'sin señal de fibra óptica',
   };
   return map[String(status).toLowerCase()] || status || 'desconocido';
 }
@@ -160,12 +160,12 @@ function translateStatus(status) {
 function translateSignal(signal) {
   const map = {
     'very good': 'muy buena',
-    warning: 'en advertencia (será revisada)',
-    critical: 'crítica (requiere revisión inmediata)',
+    warning: 'baja (en advertencia)',
+    critical: 'muy baja (nivel crítico)',
   };
   const key = String(signal).toLowerCase();
   if (map[key]) return map[key];
-  return 'sin señal de conexión de fibra óptica';
+  return 'sin lectura de señal';
 }
 
 // SmartOLT manda algo como "2026-09-02 02:45:47.425187" — lo
@@ -177,13 +177,11 @@ function formatLastStatusChange(rawDate) {
   const date = new Date(cleaned);
   if (isNaN(date.getTime())) return rawDate;
 
-  return date.toLocaleString('es-CO', {
-    day: 'numeric',
-    month: 'long',
-    hour: 'numeric',
-    minute: '2-digit',
-    hour12: true,
-  });
+  // "8 de octubre, 10:00 a. m." → "8 de octubre a las 10:00 a. m."
+  // (termina en "m.": no ponerlo al final de una frase con otro punto)
+  return date
+    .toLocaleString('es-CO', { day: 'numeric', month: 'long', hour: 'numeric', minute: '2-digit', hour12: true })
+    .replace(/,\s*/, ' a las ');
 }
 
 /**
@@ -391,12 +389,11 @@ async function getOnuSignalGraph(abonado, graphType = 'daily') {
 // ---------------------------------------------------------------
 // Cambio de contraseña WiFi
 // ---------------------------------------------------------------
-// Solo se permite cuando la ONU:
-//   1) está Online,
-//   2) está en modo Routing (el WiFi es de la ONU, no de un router aparte),
-//   3) su modelo (onu_type_name) ya se probó: ver wifiCompatibles.js.
-// Excepción: los abonados de WIFI_ABONADOS_PRUEBA, para probar modelos nuevos.
-const { configModelo, esAbonadoPrueba, PUERTO_24, PUERTO_5 } = require('./wifiCompatibles');
+// El bot lo intenta con cualquier ONU que esté Online. Qué modelos sirven
+// y cuáles no se aprende de los intentos reales (ver wifiCompat.js).
+const PUERTO_24 = 'wifi_0/1';
+const PUERTO_5 = 'wifi_0/5';
+const PUERTO_BANDA = { '24': PUERTO_24, '5': PUERTO_5 };
 
 async function ubicarOnu(abonado) {
   const city = getCityFromAbonado(abonado);
@@ -407,10 +404,19 @@ async function ubicarOnu(abonado) {
   return match ? { baseUrl, ...match } : null;
 }
 
+function leerPuertosWifi(det) {
+  const puertos = {};
+  (Array.isArray(det?.wifi_ports) ? det.wifi_ports : []).forEach((p) => {
+    if (p && p.port) puertos[p.port] = { ssid: p.ssid || null, dhcp: p.dhcp || null };
+  });
+  return puertos;
+}
+
 /**
- * ¿Se puede cambiar la contraseña WiFi de este abonado desde SmartOLT?
- * @returns {Promise<{ok:true, dual:boolean, puertos:object} | {ok:false, motivo:string}>}
- *   motivo: no_encontrada | sin_respuesta | offline | bridge | modelo_no_soportado
+ * Lee la ONU antes de cambiar la clave.
+ * @returns {Promise<{ok:false, motivo:string} | {ok:true, modelo, modo, bandas:string[]|null, puertos:object}>}
+ *   motivo: no_encontrada | sin_respuesta | offline
+ *   bandas: ['24','5'] / ['24'] según los puertos que reporta SmartOLT; null si no reporta ninguno
  */
 async function revisarCambioWifi(abonado) {
   const onu = await ubicarOnu(abonado);
@@ -423,61 +429,36 @@ async function revisarCambioWifi(abonado) {
   const det = detailData?.onu_details;
   if (!statusData || !det) return { ok: false, motivo: 'sin_respuesta' };
 
-  const modelo = String(det.onu_type_name || '').toUpperCase();
-  const log = `📶 Cambio WiFi ${abonado}: estado=${statusData.onu_status}, modo=${det.mode}, modelo=${modelo}`;
+  const modelo = String(det.onu_type_name || 'DESCONOCIDO').toUpperCase();
+  const puertos = leerPuertosWifi(det);
+  const nombres = Object.keys(puertos);
+  const bandas = nombres.length === 0 ? null : nombres.includes(PUERTO_5) ? ['24', '5'] : ['24'];
+  console.log(
+    `📶 Cambio WiFi ${abonado}: estado=${statusData.onu_status}, modo=${det.mode}, modelo=${modelo}, puertos=${nombres.join(',') || 'sin reportar'}`
+  );
 
-  if (String(statusData.onu_status || '').toLowerCase() !== 'online') {
-    console.log(`${log} → no (offline)`);
-    return { ok: false, motivo: 'offline' };
-  }
-  if (String(det.mode || '').toLowerCase() !== 'routing') {
-    console.log(`${log} → no (bridge)`);
-    return { ok: false, motivo: 'bridge' };
-  }
-  // Configuración actual de cada puerto WiFi, para reenviar el mismo SSID y DHCP
-  const wifiPorts = Array.isArray(det.wifi_ports) ? det.wifi_ports : [];
-  let cfg = configModelo(modelo);
-  if (!cfg && esAbonadoPrueba(abonado)) {
-    // Prueba en caliente de un modelo nuevo: doble banda si SmartOLT reporta wifi_0/5
-    const tiene5 = wifiPorts.length === 0 || wifiPorts.some((p) => p && p.port === PUERTO_5);
-    cfg = { bandas: tiene5 ? 'dual' : '24', puertos: { '24': PUERTO_24, '5': PUERTO_5 } };
-    console.log(`${log} → PRUEBA EN CALIENTE (abonado en WIFI_ABONADOS_PRUEBA), wifi_ports=${wifiPorts.map((p) => p && p.port).join(',') || 'vacío'}`);
-  }
-  if (!cfg) {
-    console.log(`${log} → no (modelo no probado: agregar en wifiCompatibles.js tras la prueba)`);
-    return { ok: false, motivo: 'modelo_no_soportado' };
-  }
-
-  // Configuración actual de cada puerto WiFi, para reenviar el mismo SSID y DHCP
-  const puertos = {};
-  wifiPorts.forEach((p) => {
-    if (p && p.port) puertos[p.port] = { ssid: p.ssid || null, dhcp: p.dhcp || null };
-  });
-
-  console.log(`${log} → sí (${cfg.bandas})`);
-  return { ok: true, dual: cfg.bandas === 'dual', puertos, puertosBanda: cfg.puertos };
+  if (String(statusData.onu_status || '').toLowerCase() !== 'online') return { ok: false, motivo: 'offline' };
+  return { ok: true, modelo, modo: det.mode || null, bandas, puertos };
 }
 
 /**
- * Cambia la contraseña de una banda (WPA2), conservando el SSID y el DHCP
- * actuales cuando SmartOLT los reporta. NUNCA se loguea la contraseña.
- * @param {string} abonado
- * @param {'24'|'5'} banda
- * @param {string} password
- * @param {object} [puertos] - lo que devolvió revisarCambioWifi() (.puertos)
- * @param {object} [puertosBanda] - { '24': 'wifi_0/1', '5': 'wifi_0/5' } según el modelo
- * @returns {Promise<{ok:boolean, respuesta:string|null}>}
+ * Cambia la contraseña de una banda (WPA2), reenviando el SSID y el DHCP
+ * actuales cuando SmartOLT los reporta, y después verifica que el SSID
+ * no haya cambiado. NUNCA se loguea la contraseña.
+ * @returns {Promise<{ok:boolean, respuesta:string|null, puerto:string, ssidConservado:boolean|null}>}
  */
-async function cambiarClaveWifi(abonado, banda, password, puertos = {}, puertosBanda = {}) {
-  const wifiPort = puertosBanda[banda] || (banda === '5' ? PUERTO_5 : banda === '24' ? PUERTO_24 : null);
+async function cambiarClaveWifi(abonado, banda, password, puertos = {}) {
+  const puerto = PUERTO_BANDA[banda];
   const onu = await ubicarOnu(abonado);
-  if (!wifiPort || !onu) return { ok: false, respuesta: null };
+  if (!puerto || !onu) return { ok: false, respuesta: 'ONU no encontrada', puerto, ssidConservado: null };
 
-  const actual = puertos[wifiPort] || {};
-  const form = new URLSearchParams({ wifi_port: wifiPort, password, authentication_mode: 'WPA2' });
-  if (actual.ssid) form.set('ssid', actual.ssid);
-  if (actual.dhcp) form.set('dhcp', actual.dhcp);
+  const antes = puertos[puerto] || {};
+  const form = new URLSearchParams({ wifi_port: puerto, password, authentication_mode: 'WPA2' });
+  if (antes.ssid) form.set('ssid', antes.ssid);
+  if (antes.dhcp) form.set('dhcp', antes.dhcp);
 
+  let ok = false;
+  let respuesta = null;
   try {
     const response = await axios.post(
       `${onu.baseUrl}/api/onu/set_wifi_port_lan/${encodeURIComponent(onu.externalId)}`,
@@ -487,14 +468,23 @@ async function cambiarClaveWifi(abonado, banda, password, puertos = {}, puertosB
         validateStatus: (st) => st === 200 || st === 400,
       }
     );
-    const ok = response.status === 200 && response.data?.status === true;
-    const respuesta = response.data?.response || response.data?.error || null;
-    console.log(`📶 Cambio WiFi ${abonado} ${wifiPort}: ${ok ? 'OK' : 'falló'} — ${respuesta}`);
-    return { ok, respuesta };
+    ok = response.status === 200 && response.data?.status === true;
+    respuesta = response.data?.response || response.data?.error || `HTTP ${response.status}`;
   } catch (err) {
-    console.warn(`⚠️  Error cambiando WiFi en SmartOLT (${abonado} ${wifiPort}):`, err.message);
-    return { ok: false, respuesta: null };
+    respuesta = err.message;
   }
+
+  // Verificación: ¿el SSID sigue igual? (solo si SmartOLT lo reportaba antes)
+  let ssidConservado = null;
+  if (ok && antes.ssid) {
+    const det = await fetchOnuField(onu.baseUrl, onu.apiKey, onu.externalId, '/api/onu/get_onu_details');
+    const despues = leerPuertosWifi(det?.onu_details)[puerto];
+    if (despues && despues.ssid) ssidConservado = despues.ssid === antes.ssid;
+  }
+  if (ssidConservado === false) ok = false; // la clave cambió pero la red quedó con otro nombre: lo arregla MDA
+
+  console.log(`📶 Cambio WiFi ${abonado} ${puerto}: ${ok ? 'OK' : 'falló'} — ${respuesta}${ssidConservado === false ? ' (SSID cambió)' : ''}`);
+  return { ok, respuesta, puerto, ssidConservado };
 }
 
 module.exports = {

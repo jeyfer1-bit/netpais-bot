@@ -29,12 +29,15 @@ const {
 const { sendImageMessage } = require('./whatsapp');
 const {
   classify,
+  esOpcionMenu,
+  detalleTexto,
   classifySubIssue,
   buildConfirmationMessage,
   CLARIFYING_MESSAGE,
 } = require('./novedad');
 const { classifyNovedadWithAI, rewriteWarmly } = require('./ai');
 const { checkOrdenStatus, getTipificacionInfo } = require('./ordenes');
+const wifiCompat = require('./wifiCompat');
 
 // sessions: Map<numeroDeWhatsapp, sessionObject>
 const sessions = new Map();
@@ -339,9 +342,10 @@ async function buildCrearOrdenMessage(abonado, detalleOrden) {
   if (!info) {
     base = `Vamos a crear una orden por "${detalleOrden}".`;
   } else {
-    const tipoTexto = info.tipoRevision ? ` de forma ${info.tipoRevision.toLowerCase()}` : '';
-    const tiempoTexto = info.tiempo ? `, la cual será atendida en un máximo de ${info.tiempo}` : '';
-    base = `Vamos a crear una orden por "${detalleOrden}"${tiempoTexto}${tipoTexto ? ',' : ''}${tipoTexto}.`;
+    const tipo = String(info.tipoRevision || '').toLowerCase();
+    const comoTexto = tipo.startsWith('f') ? ' con visita técnica' : tipo.startsWith('r') ? ' de forma remota' : '';
+    const tiempoTexto = info.tiempo ? ` Será atendida${comoTexto} en un máximo de ${info.tiempo}.` : comoTexto ? ` Será atendida${comoTexto}.` : '';
+    base = `Vamos a crear una orden por "${detalleOrden}".${tiempoTexto}`;
     if (info.tiempo) criticalPhrases.push(info.tiempo);
   }
 
@@ -408,6 +412,18 @@ function classifySpeedTestResult(text, planMbps) {
     };
   }
 
+  // Caso 1b: un valor con unidad ("me dio 120 megas", "80mbps") o un único número
+  const conUnidad = t.match(/(\d+(?:[.,]\d+)?)\s*(mbps|mb\b|megas?\b|mega\b|m\b)/);
+  const numeros = t.match(/\d+(?:[.,]\d+)?/g) || [];
+  const valorSuelto = conUnidad ? conUnidad[1] : numeros.length === 1 ? numeros[0] : null;
+  if (valorSuelto && planMbps) {
+    const valor = Number(valorSuelto.replace(',', '.'));
+    return {
+      resultado: valor >= planMbps * SPEED_TEST_TOLERANCE ? 'positivo' : 'negativo',
+      valorBajada: valor,
+    };
+  }
+
   // Caso 2: el cliente responde textualmente si dio bien o mal
   if (/\bbien\b|\bnormal\b|\bcorrecto\b|\bok\b/.test(t)) return { resultado: 'positivo', valorBajada: null };
   if (/\bmal\b|\bmalo\b|\bincorrecto\b|\bbajo\b|\bpoco\b/.test(t)) return { resultado: 'negativo', valorBajada: null };
@@ -466,10 +482,12 @@ async function proceedWithCustomer(session, phone, customer, replies) {
     // -------- Flujo 2: Validar abonado SmartOLT --------
     const onu = await getOnuSignal(customer.abonado);
     if (onu) {
+      const enLinea = String(onu.status).toLowerCase() === 'online';
+      const desde = formatLastStatusChange(onu.lastStatusChange);
       replies.push(
-        `¡Listo! Ya validé tu servicio 🙌 Tu conexión está ${translateStatus(onu.status)}, ` +
-        `la señal está ${translateSignal(onu.signal)}, ` +
-        `y el último cambio fue el ${formatLastStatusChange(onu.lastStatusChange)}.`
+        enLinea
+          ? `Revisé tu conexión 📡 Tu equipo está en línea y la señal está ${translateSignal(onu.signal)} (conectado desde el ${desde}).`
+          : `Revisé tu conexión 📡 Tu equipo aparece ${translateStatus(onu.status)} (desde el ${desde}).`
       );
     } else {
       replies.push(
@@ -711,18 +729,24 @@ async function procesar(phone, text) {
 
   // -------- Paso: identificar la novedad (Flujo 3) --------
   if (session.step === STEPS.ASK_REQUIREMENT) {
-    let category = classify(text);
-
-    // Respaldo con IA (Nivel 1): solo se intenta si el matching por
-    // palabras clave no logró identificar la categoría. Si Gemini
-    // tampoco puede, cae al menú numerado de siempre — nunca se queda
-    // sin salida.
-    if (!category) {
+    // 1) Respondió con un número del menú → directo.
+    // 2) Texto libre → primero la IA (entiende jerga y errores), luego
+    //    palabras clave como respaldo, y solo si nada funciona, el menú.
+    let category = null;
+    let detalleIA = null;
+    if (esOpcionMenu(text)) {
+      category = classify(text);
+    } else {
       try {
-        category = await classifyNovedadWithAI(text);
+        const ia = await classifyNovedadWithAI(text);
+        if (ia) {
+          category = ia.categoria;
+          detalleIA = ia.detalle;
+        }
       } catch (err) {
         console.error('Error clasificando novedad con IA:', err.message);
       }
+      if (!category) category = classify(text);
     }
 
     if (!category) {
@@ -732,7 +756,7 @@ async function procesar(phone, text) {
 
     session.novedadCategory = category;
     session.novedadDetalle =
-      category === 'novedadconservicio' ? classifySubIssue(text) : null;
+      category === 'novedadconservicio' ? (detalleIA ? detalleTexto(detalleIA) : classifySubIssue(text)) : null;
 
     replies.push(buildConfirmationMessage(category, session.novedadDetalle));
     replies.push('¿Es correcto? (sí/no)');
@@ -762,7 +786,7 @@ async function procesar(phone, text) {
         try {
           rev = await revisarCambioWifi(session.customer.abonado);
         } catch (err) {
-          console.error('Error revisando cambio de WiFi:', err.message);
+          console.error('Error revisando la ONU para cambio de WiFi:', err.message);
           rev = { ok: false, motivo: 'error' };
         }
 
@@ -770,24 +794,39 @@ async function procesar(phone, text) {
           const mensaje =
             rev.motivo === 'offline'
               ? 'Veo que tu equipo no está conectado en este momento, así que no puedo cambiar la contraseña desde aquí 🙏 Te voy a comunicar con un asesor de MDA para que te ayude. 🙌'
-              : 'Revisé tu equipo y el cambio de contraseña no se puede hacer desde aquí 🙏 Te voy a comunicar con un asesor de MDA para que te ayude. 🙌';
+              : 'No pude consultar tu equipo en este momento 🙏 Te voy a comunicar con un asesor de MDA para que te ayude con el cambio de contraseña. 🙌';
           return transferir(phone, replies, 'mda', `wifi_${rev.motivo}`, mensaje);
         }
 
+        // Se intenta con cualquier modelo, salvo las bandas que ya se probaron
+        // varias veces sin éxito en ese modelo (wifiCompat.js)
+        const bandasEquipo = rev.bandas || ['24', '5'];
+        const bandas = [];
+        for (const b of bandasEquipo) {
+          if ((await wifiCompat.estado(rev.modelo, b)) !== 'no_compatible') bandas.push(b);
+        }
+        if (bandas.length === 0) {
+          return transferir(phone, replies, 'mda', 'wifi_modelo_no_compatible', 'Revisé tu equipo y el cambio de contraseña no se puede hacer desde aquí 🙏 Te voy a comunicar con un asesor de MDA para que te ayude. 🙌');
+        }
+
+        session.wifiModelo = rev.modelo;
+        session.wifiModo = rev.modo;
         session.wifiPuertos = rev.puertos;
-        session.wifiPuertosBanda = rev.puertosBanda;
+        session.wifiBandasDisponibles = bandas;
         session.wifiIntentos = 0;
-        if (rev.dual) {
-          replies.push(
-            'Listo, tu equipo permite hacer el cambio desde aquí 🙌 ¿Para cuál red quieres cambiar la contraseña?\n\n' +
-            '1️⃣ 2,4 GHz\n2️⃣ 5 GHz\n3️⃣ Ambas'
-          );
+
+        if (bandas.length === 2) {
+          replies.push('¿Para cuál red WiFi quieres cambiar la contraseña?\n\n1️⃣ 2,4 GHz\n2️⃣ 5 GHz\n3️⃣ Ambas');
           session.step = STEPS.WIFI_ASK_BAND;
           return replies;
         }
 
-        session.wifiBandas = ['24'];
-        replies.push('Listo, tu equipo permite hacer el cambio desde aquí 🙌 Tu equipo maneja una sola red WiFi (2,4 GHz), así que el cambio aplica para esa.');
+        session.wifiBandas = bandas;
+        replies.push(
+          bandasEquipo.length === 1
+            ? 'Tu equipo maneja una sola red WiFi (2,4 GHz), así que el cambio aplica para esa.'
+            : `Desde aquí puedo cambiar la contraseña de tu red de ${WIFI_BANDA_TXT[bandas[0]]}.`
+        );
         replies.push(mensajePedirClaveWifi());
         session.step = STEPS.WIFI_ASK_PASSWORD;
         return replies;
@@ -938,7 +977,7 @@ async function procesar(phone, text) {
     }
 
     if (isNegative(text)) {
-      replies.push('Ok, cuéntame de nuevo con tus palabras qué necesitas 🙂');
+      replies.push('Ok, sin problema 🙂');
       replies.push(CLARIFYING_MESSAGE);
       session.step = STEPS.ASK_REQUIREMENT;
       return replies;
@@ -1188,7 +1227,9 @@ async function procesar(phone, text) {
 
   // -------- Flujo sin servicio: ¿algún LED en rojo? --------
   if (session.step === STEPS.SIN_ASK_LED_RED) {
-    if (isAffirmative(text)) {
+    const nt = normalize(text);
+    const mencionaRojo = /\broj[oa]s?\b/.test(nt) && !/^no\b|ningun/.test(nt);
+    if (isAffirmative(text) || mencionaRojo) {
       const onu = await getOnuSignal(session.customer.abonado);
       const stillDown = !onu || String(onu.status).toLowerCase() !== 'online';
 
@@ -1226,10 +1267,18 @@ async function procesar(phone, text) {
     }
 
     if (isNegative(text)) {
-      replies.push(
-        'Vemos tu equipo actualmente conectado con normalidad, por lo que la falla podría deberse a un tema de configuración avanzada del módem.'
-      );
-      replies.push(await buildCrearOrdenMessage(session.customer.abonado, 'SIN SERVICIO CONFIGURACIÓN ONT'));
+      // Se vuelve a consultar la ONU: el mensaje depende de si de verdad está conectada
+      const onu = await getOnuSignal(session.customer.abonado);
+      const enLinea = onu && String(onu.status).toLowerCase() === 'online';
+      if (enLinea) {
+        replies.push(
+          'Vemos tu equipo actualmente conectado con normalidad, por lo que la falla podría deberse a un tema de configuración avanzada del módem.'
+        );
+        replies.push(await buildCrearOrdenMessage(session.customer.abonado, 'SIN SERVICIO CONFIGURACIÓN ONT'));
+      } else {
+        replies.push('Vemos que tu equipo sigue sin conexión con nuestra red.');
+        replies.push(await buildCrearOrdenMessage(session.customer.abonado, 'SIN SERVICIO CORTE DE FIBRA ÓPTICA'));
+      }
       replies.push('¿Hay algo más en lo que pueda ayudarte? (sí/no)');
       session.step = STEPS.ASK_ANYTHING_ELSE;
       return replies;
@@ -1601,14 +1650,24 @@ async function procesar(phone, text) {
     const resultados = [];
     for (const banda of bandas) {
       // Una banda a la vez: la OLT procesa los comandos de a uno
-      const r = await cambiarClaveWifi(session.customer.abonado, banda, pendiente.password, session.wifiPuertos || {}, session.wifiPuertosBanda || {});
+      const r = await cambiarClaveWifi(session.customer.abonado, banda, pendiente.password, session.wifiPuertos || {});
       resultados.push({ banda, ...r });
+      await wifiCompat.registrarIntento({
+        modelo: session.wifiModelo,
+        banda,
+        puerto: r.puerto,
+        modo: session.wifiModo,
+        abonado: session.customer.abonado,
+        ok: r.ok,
+        ssidConservado: r.ssidConservado,
+        respuesta: r.respuesta,
+      });
     }
     const okTxt = resultados.filter((r) => r.ok).map((r) => WIFI_BANDA_TXT[r.banda]);
     const falloTxt = resultados.filter((r) => !r.ok).map((r) => WIFI_BANDA_TXT[r.banda]);
     anotar(phone).eventos.push({
       tipo: 'clave_wifi',
-      nota: resultados.map((r) => `${WIFI_BANDA_TXT[r.banda]}: ${r.ok ? 'ok' : 'falló'} (${r.respuesta || 'sin respuesta'})`).join(' | ').slice(0, 500),
+      nota: `${session.wifiModelo || ''} — ` + resultados.map((r) => `${WIFI_BANDA_TXT[r.banda]}: ${r.ok ? 'ok' : 'falló'} (${r.respuesta || 'sin respuesta'})`).join(' | ').slice(0, 500),
     });
 
     if (falloTxt.length > 0) {
@@ -1624,7 +1683,9 @@ async function procesar(phone, text) {
     replies.push('¿Hay algo más en lo que pueda ayudarte? (sí/no)');
     session.wifiBandas = null;
     session.wifiPuertos = null;
-    session.wifiPuertosBanda = null;
+    session.wifiModelo = null;
+    session.wifiModo = null;
+    session.wifiBandasDisponibles = null;
     session.wifiIntentos = 0;
     session.step = STEPS.ASK_ANYTHING_ELSE;
     return replies;
@@ -1658,6 +1719,9 @@ async function procesar(phone, text) {
       session.novTvPendingOrder = null;
       session.wifiBandas = null;
       session.wifiPuertos = null;
+      session.wifiModelo = null;
+      session.wifiModo = null;
+      session.wifiBandasDisponibles = null;
       session.wifiIntentos = 0;
       session.step = STEPS.ASK_REQUIREMENT;
       return replies;

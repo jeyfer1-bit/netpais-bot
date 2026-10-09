@@ -115,6 +115,22 @@ async function migrar() {
       atendida_en TIMESTAMPTZ,                -- la marca el programador
       atendida_por TEXT
     );
+
+    -- Cada intento de cambio de clave WiFi desde el bot, por modelo de ONU y banda.
+    -- De aquí sale la lista de modelos compatibles / no compatibles (wifiCompat.js).
+    CREATE TABLE IF NOT EXISTS bot_wifi_intentos (
+      id BIGSERIAL PRIMARY KEY,
+      modelo TEXT NOT NULL,                   -- onu_type_name en SmartOLT
+      banda TEXT NOT NULL,                    -- '24' | '5'
+      puerto TEXT,                            -- wifi_0/1, wifi_0/5
+      modo TEXT,                              -- Routing / Bridging
+      abonado TEXT,
+      ok BOOLEAN NOT NULL,                    -- SmartOLT confirmó y el SSID se conservó
+      ssid_conservado BOOLEAN,                -- null = SmartOLT no reporta el SSID
+      respuesta TEXT,
+      creado_en TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS bot_wifi_modelo ON bot_wifi_intentos (modelo, banda);
   `);
   console.log('🗄️ Tablas del bot listas en Postgres');
 }

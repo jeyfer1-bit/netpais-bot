@@ -17,7 +17,7 @@
 const axios = require('axios');
 
 const { GEMINI_API_KEY } = process.env;
-const GEMINI_MODEL = 'gemini-3.6-flash';
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.6-flash';
 const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
 const NOVEDAD_CATEGORIES = [
@@ -34,7 +34,7 @@ const NOVEDAD_CATEGORIES = [
  * Llama a Gemini con las "parts" dadas (texto y/o datos binarios en base64)
  * y devuelve el texto de la respuesta, o null si algo falla.
  */
-async function callGemini(parts, { maxOutputTokens = 300 } = {}) {
+async function callGemini(parts, { maxOutputTokens = 1024, thinkingLevel = 'low' } = {}) {
   if (!GEMINI_API_KEY) {
     console.warn('⚠️  Falta GEMINI_API_KEY — no se puede llamar a Gemini.');
     return null;
@@ -45,13 +45,27 @@ async function callGemini(parts, { maxOutputTokens = 300 } = {}) {
       `${GEMINI_URL}?key=${GEMINI_API_KEY}`,
       {
         contents: [{ parts }],
-        generationConfig: { maxOutputTokens, temperature: 0.2 },
+        // Gemini 3.x razona antes de responder y ese razonamiento gasta del
+        // mismo límite de tokens: con límites bajos (antes 20) la respuesta
+        // llegaba vacía y el bot caía al menú. Razonamiento bajo + margen amplio.
+        generationConfig: { maxOutputTokens, temperature: 0.2, thinkingConfig: { thinkingLevel } },
       },
       { headers: { 'Content-Type': 'application/json' } }
     );
 
-    const text = response.data?.candidates?.[0]?.content?.parts?.[0]?.text;
-    return text ? text.trim() : null;
+    // Los modelos con razonamiento pueden traer varias "parts" (algunas son
+    // pensamiento): se une solo el texto de respuesta.
+    const cand = response.data?.candidates?.[0];
+    const text = (cand?.content?.parts || [])
+      .filter((p) => p && typeof p.text === 'string' && !p.thought)
+      .map((p) => p.text)
+      .join('')
+      .trim();
+    if (!text) {
+      console.warn(`⚠️  Gemini respondió sin texto (finishReason=${cand?.finishReason || 'N/D'})`);
+      return null;
+    }
+    return text;
   } catch (err) {
     console.warn('⚠️  Error llamando a Gemini:', err?.response?.data || err.message);
     return null;
@@ -105,35 +119,60 @@ async function describeImage(buffer, mimeType = 'image/jpeg', contextHint = '') 
 }
 
 /**
- * Respaldo de clasificación de novedad (Nivel 1), usado solo cuando
- * classify() de novedad.js no logra identificar la categoría por
- * palabras clave. Devuelve una de las 7 categorías válidas, o null.
+ * Clasifica la novedad que el cliente describe con sus palabras. Es el
+ * primer intento para texto libre (antes de las palabras clave de
+ * novedad.js); si falla o no está segura, flow.js cae a las palabras
+ * clave y, por último, al menú.
  * @param {string} text
- * @returns {Promise<string|null>}
+ * @returns {Promise<{categoria:string, detalle:string|null}|null>}
+ *   detalle (solo novedadconservicio): intermitencia | lentitud | ambas | general
  */
 async function classifyNovedadWithAI(text) {
   const parts = [
     {
       text:
-        `Eres un clasificador para un bot de soporte de internet. El cliente escribió: "${text}"\n\n` +
-        'Clasifícalo en EXACTAMENTE una de estas categorías (responde solo con la palabra clave, en minúsculas, sin nada más):\n\n' +
-        '- orden: quiere saber el estado de una orden o visita de mantenimiento ya agendada\n' +
-        '- novedadconservicio: tiene servicio activo pero con fallas (intermitencias, se corta, lento)\n' +
-        '- sinservicio: no tiene internet en absoluto\n' +
-        '- tv: problema con el servicio de televisión\n' +
-        '- aplicaciones: problema con una app o página web específica (no carga, no abre)\n' +
-        '- velocidadcontratada: su test de velocidad no corresponde con las megas contratadas (ej: "no me dan las megas", "no me da la velocidad que pague")\n' +
-        '- clavewifi: quiere cambiar la contraseña o clave de su red WiFi\n\n' +
-        'Si no puedes clasificarlo con confianza en ninguna de estas categorías, responde exactamente: ninguna',
+        'Eres el clasificador de un bot de soporte de un proveedor de internet y TV por fibra óptica en Colombia. ' +
+        'Los clientes escriben informal, con errores de ortografía, sin tildes o con jerga.\n\n' +
+        `Mensaje del cliente: «${String(text).slice(0, 500)}»\n\n` +
+        'Categorías:\n' +
+        '- orden: pregunta por una orden, visita técnica, técnico, cita o instalación ya solicitada ("cuándo vienen", "me dijeron que venían", "sigo esperando al técnico")\n' +
+        '- novedadconservicio: tiene internet pero falla: lento, se cae, se corta, intermitente, se desconecta, el wifi no alcanza o es débil en una zona de la casa\n' +
+        '- sinservicio: no tiene nada de internet: no navega, luz roja o LOS en el módem, fibra rota, módem apagado o dañado\n' +
+        '- tv: problemas con la televisión: canales, sin señal de TV, pixelado, decodificador\n' +
+        '- aplicaciones: una página o app puntual no abre o no carga, pero lo demás sí funciona (Netflix, YouTube, juegos, bancos)\n' +
+        '- velocidadcontratada: el test de velocidad no da las megas contratadas ("pago 300 y me llegan 80")\n' +
+        '- clavewifi: quiere cambiar la contraseña o clave del WiFi, u olvidó la clave\n\n' +
+        'Responde en UNA sola línea con el formato categoria|detalle, sin nada más:\n' +
+        '- detalle solo aplica a novedadconservicio: intermitencia, lentitud, ambas o general. En las demás categorías escribe -\n' +
+        '- Si el mensaje no describe ninguna de estas situaciones (un saludo, otra pregunta, algo administrativo o de pagos), responde: ninguna|-\n\n' +
+        'Ejemplos:\n' +
+        '"el internet se me va a cada rato" -> novedadconservicio|intermitencia\n' +
+        '"esta re lento todo" -> novedadconservicio|lentitud\n' +
+        '"no tengo internet desde ayer y el aparato tiene una luz roja" -> sinservicio|-\n' +
+        '"quiero saber cuando vienen a arreglar" -> orden|-\n' +
+        '"netflix no carga pero lo demas si" -> aplicaciones|-\n' +
+        '"se me olvido la clave del wifi" -> clavewifi|-\n' +
+        '"quiero pagar la factura" -> ninguna|-',
     },
   ];
 
-  const result = await callGemini(parts, { maxOutputTokens: 20 });
+  // Margen amplio de tokens: los modelos con razonamiento gastan parte en
+  // "pensar" y con un límite bajo devuelven la respuesta vacía.
+  const result = await callGemini(parts, { maxOutputTokens: 1024 });
   if (!result) return null;
 
-  const category = result.trim().toLowerCase();
-  return NOVEDAD_CATEGORIES.includes(category) ? category : null;
+  const linea = result.split('\n').map((l) => l.trim()).find(Boolean) || '';
+  const [catRaw, detRaw] = linea.toLowerCase().replace(/[`*"']/g, '').split('|');
+  const categoria = (catRaw || '').replace(/[^a-z]/g, '');
+  const detalle = (detRaw || '').replace(/[^a-z]/g, '');
+  console.log(`🤖 IA clasificó "${String(text).slice(0, 80)}" → ${linea}`);
+  if (!NOVEDAD_CATEGORIES.includes(categoria)) return null;
+  return {
+    categoria,
+    detalle: categoria === 'novedadconservicio' && ['intermitencia', 'lentitud', 'ambas', 'general'].includes(detalle) ? detalle : null,
+  };
 }
+
 
 /**
  * Reescribe un mensaje del bot para que suene más cálido y cercano —
@@ -164,7 +203,7 @@ async function rewriteWarmly(message, criticalPhrases = []) {
     },
   ];
 
-  const rewritten = await callGemini(parts, { maxOutputTokens: 400 });
+  const rewritten = await callGemini(parts);
   if (!rewritten) return message;
 
   // Verificación obligatoria: si falta alguna frase crítica tal cual,

@@ -4,10 +4,10 @@
 //   railway run node scripts/wifi_diag.js IBA015859
 //
 // Muestra lo que el bot ve de la ONU (estado, modo, modelo, puertos WiFi)
-// y si hoy el bot permitiría el cambio. No cambia nada en la ONU.
+// y lo aprendido de ese modelo. No cambia nada en la ONU.
 // Las contraseñas que reporte SmartOLT se ocultan.
 const { ubicarOnu, fetchOnuField, revisarCambioWifi } = require('../smartolt');
-const { configModelo, esAbonadoPrueba } = require('../wifiCompatibles');
+const wifiCompat = require('../wifiCompat');
 
 function ocultar(obj) {
   return JSON.parse(JSON.stringify(obj || {}, (k, v) => (/pass|key|psk|secret/i.test(k) && v ? '***' : v)));
@@ -35,10 +35,9 @@ function ocultar(obj) {
   console.log('modo          :', d.mode);
   console.log('onu_type_name :', d.onu_type_name);
   console.log('sn            :', d.sn);
-  console.log('en la lista   :', JSON.stringify(configModelo(d.onu_type_name)));
-  console.log('abonado prueba:', esAbonadoPrueba(abonado));
+  for (const b of ['24', '5']) console.log(`compat ${b === '24' ? '2,4' : '5'} GHz  :`, await wifiCompat.estado(d.onu_type_name, b));
   console.log('wifi_ports    :', JSON.stringify(ocultar(d.wifi_ports), null, 2));
-  console.log('==== ¿El bot permitiría el cambio hoy?');
+  console.log('==== Lo que ve el bot antes del cambio');
   console.log(JSON.stringify(ocultar(await revisarCambioWifi(abonado)), null, 2));
 })().catch((e) => {
   console.error('Error:', e.message);

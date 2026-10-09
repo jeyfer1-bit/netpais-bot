@@ -67,9 +67,15 @@ const CATEGORY_KEYWORDS = {
   ],
   novedadconservicio: [
     'intermitencia',
+    'intermitente',
     'se corta',
     'se cae',
+    'se me cae',
+    'se me va',
+    'se va el internet',
     'se desconecta',
+    'no alcanza',
+    'senal debil',
     'lento',
     'lenta',
     'lentitud',
@@ -145,21 +151,34 @@ function classify(text) {
 function classifySubIssue(text) {
   const t = normalize(text);
 
-  if (matchesAny(t, ['intermitencia', 'se corta', 'se cae', 'se desconecta'])) {
-    return 'intermitencias en tu conexión';
-  }
-  if (matchesAny(t, ['lento', 'lenta', 'lentitud'])) {
-    return 'lentitud en tu conexión';
-  }
-  return 'tu conexión'; // respaldo genérico si no se identifica el detalle exacto
+  const corta = matchesAny(t, ['intermitencia', 'se corta', 'se cae', 'se desconecta']);
+  const lenta = matchesAny(t, ['lento', 'lenta', 'lentitud']);
+  return DETALLE_TXT[corta && lenta ? 'ambas' : corta ? 'intermitencia' : lenta ? 'lentitud' : 'general'];
+}
+
+// Cómo se nombra el detalle de "novedadconservicio" en el mensaje de confirmación
+const DETALLE_TXT = {
+  intermitencia: 'intermitencias (se corta o se desconecta)',
+  lentitud: 'lentitud',
+  ambas: 'lentitud e intermitencias',
+  general: 'fallas (lentitud o cortes)',
+};
+
+function detalleTexto(codigo) {
+  return DETALLE_TXT[codigo] || DETALLE_TXT.general;
+}
+
+/** ¿El cliente respondió con un número del menú (1 a 7)? */
+function esOpcionMenu(text) {
+  return /^(la |el |opcion |numero |es la |es el |la opcion |el numero |respuesta )?[1-7]\.?$/.test(normalize(text));
 }
 
 function buildConfirmationMessage(category, detalle) {
   switch (category) {
     case 'orden':
-      return '¿Quieres saber el estado actual de tu orden de mantenimiento?';
+      return 'Entiendo: quieres saber el estado de tu orden o de la visita técnica.';
     case 'novedadconservicio':
-      return `Entiendo: actualmente tienes servicio, pero presentas ${detalle}.`;
+      return `Entiendo: tienes servicio, pero tu conexión presenta ${detalle || DETALLE_TXT.general}.`;
     case 'sinservicio':
       return 'Entiendo: actualmente no cuentas con servicio de internet, ni por cable ni por wifi.';
     case 'tv':
@@ -188,6 +207,8 @@ const CLARIFYING_MESSAGE =
 
 module.exports = {
   classify,
+  esOpcionMenu,
+  detalleTexto,
   classifySubIssue,
   buildConfirmationMessage,
   CLARIFYING_MESSAGE,
