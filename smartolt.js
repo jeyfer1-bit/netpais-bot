@@ -70,6 +70,11 @@ async function refreshCityOnuList(city) {
           oltName: onu.olt_name || '',
           board: onu.board != null ? Number(onu.board) : null,
           port: onu.port != null ? Number(onu.port) : null,
+          // Foto del estado al momento del refresco (para los vecinos del puerto PON en el tablero)
+          status: onu.status || '',
+          signal: onu.signal || '',
+          signal1310: onu.signal_1310 || null, // dBm del ONU leído en la OLT (subida)
+          signal1490: onu.signal_1490 || null, // dBm recibido por la ONU (bajada)
         }))
       );
     } catch (err) {
@@ -491,6 +496,98 @@ async function cambiarClaveWifi(abonado, banda, password, puertos = {}) {
   return { ok, respuesta, puerto, ssidConservado };
 }
 
+// ---------------------------------------------------------------
+// Tablero de gestión de clientes
+// ---------------------------------------------------------------
+const ABONADO_RE = /\b(IBA|DOR|PTO|VDR|LP)\d{3,}\b/i;
+
+/**
+ * ONUs del mismo puerto PON (misma OLT, board y puerto), de la lista cacheada.
+ * El estado es el del último refresco de la lista (máximo 1 hora).
+ */
+async function vecinosPon(abonado) {
+  const city = getCityFromAbonado(abonado);
+  if (!city) return null;
+  const entries = await getCityOnuList(city);
+  const yo = findOnuInList(entries, abonado);
+  if (!yo || yo.board == null || yo.port == null) return null;
+  const vecinos = entries.filter((e) => e !== yo && e.oltName === yo.oltName && e.board === yo.board && e.port === yo.port);
+  const st = (e) => String(e.status || '').toLowerCase();
+  const sg = (e) => String(e.signal || '').toLowerCase();
+  const conProblema = vecinos
+    .filter((e) => (st(e) && st(e) !== 'online') || sg(e) === 'warning' || sg(e) === 'critical')
+    .map((e) => ({
+      abonado: (e.name.match(ABONADO_RE) || [null])[0]?.toUpperCase() || null,
+      nombre: e.name,
+      estado: e.status || null,
+      estadoTexto: translateStatus(e.status),
+      senal: e.signal || null,
+      senalTexto: e.signal ? translateSignal(e.signal) : null,
+      senal1310: e.signal1310,
+      senal1490: e.signal1490,
+    }));
+  const cuenta = (f) => vecinos.filter(f).length;
+  return {
+    olt: yo.oltName,
+    board: yo.board,
+    puerto: yo.port,
+    total: vecinos.length,
+    enLinea: cuenta((e) => st(e) === 'online'),
+    los: cuenta((e) => st(e) === 'los'),
+    sinEnergia: cuenta((e) => st(e) === 'power fail'),
+    desconectadas: cuenta((e) => st(e) === 'offline'),
+    senalMala: cuenta((e) => sg(e) === 'warning' || sg(e) === 'critical'),
+    conProblema,
+    actualizadoEn: cache[city]?.fetchedAt ? new Date(cache[city].fetchedAt).toISOString() : null,
+  };
+}
+
+/**
+ * Ficha técnica de la ONU de un abonado, en vivo desde SmartOLT.
+ * @returns {Promise<{encontrada:false}|object>}
+ */
+async function fichaOnu(abonado) {
+  const onu = await ubicarOnu(abonado);
+  if (!onu) return { encontrada: false };
+  const campo = (path) => fetchOnuField(onu.baseUrl, onu.apiKey, onu.externalId, path);
+  const [statusData, signalData, detailData, perfiles, catv] = await Promise.all([
+    campo('/api/onu/get_onu_status'),
+    campo('/api/onu/get_onu_signal'),
+    campo('/api/onu/get_onu_details'),
+    getOnuSpeedProfiles(abonado).catch(() => null),
+    getOnuCatvStatus(abonado).catch(() => null),
+  ]);
+  const det = detailData?.onu_details || null;
+  const puertos = leerPuertosWifi(det);
+  const nombres = Object.keys(puertos);
+  const status = statusData?.onu_status || '';
+  const signal = signalData?.onu_signal || '';
+  return {
+    encontrada: true,
+    ciudad: getCityFromAbonado(abonado),
+    ubicacion: { olt: onu.oltName, board: onu.board, puerto: onu.port },
+    estado: status || null,
+    estadoTexto: status ? translateStatus(status) : 'sin respuesta de SmartOLT',
+    ultimoCambio: statusData?.last_status_change || null,
+    ultimoCambioTexto: statusData ? formatLastStatusChange(statusData.last_status_change) : null,
+    senal: signal || null,
+    senalTexto: signalData ? translateSignal(signal) : null,
+    senalValor: signalData?.onu_signal_value || null,
+    senal1490: signalData?.onu_signal_1490 || null, // recibido por la ONU (bajada)
+    senal1310: signalData?.onu_signal_1310 || null, // leído en la OLT (subida)
+    modelo: det?.onu_type_name ? String(det.onu_type_name).toUpperCase() : null,
+    modo: det?.mode || null,
+    serial: det?.sn || null,
+    nombre: det?.name || null,
+    zona: det?.zone_name || null,
+    bandasWifi: det ? (nombres.length === 0 ? null : nombres.includes(PUERTO_5) ? ['24', '5'] : ['24']) : null,
+    // SSID de cada banda (sin contraseñas: SmartOLT no las devuelve y no se piden)
+    redesWifi: nombres.map((p) => ({ banda: p === PUERTO_5 ? '5' : p === PUERTO_24 ? '24' : p, puerto: p, ssid: puertos[p].ssid })),
+    catv, // enabled | disabled | unsupported | null
+    perfil: perfiles ? { subida: perfiles.uploadProfile || null, bajada: perfiles.downloadProfile || null } : null,
+  };
+}
+
 /** OLT, board y puerto PON de la ONU de un abonado (de la lista cacheada). */
 async function ubicacionOnu(abonado) {
   const city = getCityFromAbonado(abonado);
@@ -501,6 +598,8 @@ async function ubicacionOnu(abonado) {
 }
 
 module.exports = {
+  vecinosPon,
+  fichaOnu,
   ubicacionOnu,
   revisarCambioWifi,
   cambiarClaveWifi,

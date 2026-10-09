@@ -38,6 +38,7 @@ const {
 const { classifyNovedadWithAI, rewriteWarmly } = require('./ai');
 const { checkOrdenStatus, getTipificacionInfo } = require('./ordenes');
 const wifiCompat = require('./wifiCompat');
+const onuAcciones = require('./onuAcciones');
 const eventosRed = require('./eventosRed');
 
 // sessions: Map<numeroDeWhatsapp, sessionObject>
@@ -1059,12 +1060,13 @@ async function procesar(phone, text) {
   // -------- Flujo 2: autorización para reiniciar el equipo --------
   if (session.step === STEPS.NOV_ASK_REBOOT_CONFIRM) {
     if (isAffirmative(text)) {
-      let success = false;
-      try {
-        success = await rebootOnu(session.customer.abonado);
-      } catch (err) {
-        console.error('Error reiniciando ONU:', err.message);
+      // Pasa por la bitácora y respeta el límite de reinicios por ONU en 24 h (bot + tablero)
+      const reinicio = await onuAcciones.reiniciar(session.customer.abonado, { origen: 'bot' });
+      if (reinicio.motivo === 'limite') {
+        transferir(phone, replies, 'mda', 'limite_reinicios', 'Tu equipo ya fue reiniciado varias veces en las últimas horas, así que no lo voy a reiniciar de nuevo 🙏 Te voy a comunicar con un asesor de MDA para que revise tu caso. 🙌');
+        return replies;
       }
+      const success = reinicio.ok;
 
       if (!success) {
         transferir(phone, replies, 'mda', 'error_reinicio', 'No pude enviar el comando de reinicio al equipo en este momento. Te voy a comunicar con un asesor. 🙌');
@@ -1353,6 +1355,7 @@ async function procesar(phone, text) {
       } catch (err) {
         console.error('Error encendiendo CATV:', err.message);
       }
+      await onuAcciones.registrar({ abonado: session.customer.abonado, accion: 'encender_catv', origen: 'bot', ok: success, detalle: success ? 'Encendido' : 'SmartOLT no confirmó' });
 
       if (!success) {
         transferir(phone, replies, 'mda', 'error_tv_puerto', 'No pude encender el puerto de televisión en este momento. Te voy a comunicar con un asesor. 🙌');
@@ -1680,6 +1683,13 @@ async function procesar(phone, text) {
     }
     const okTxt = resultados.filter((r) => r.ok).map((r) => WIFI_BANDA_TXT[r.banda]);
     const falloTxt = resultados.filter((r) => !r.ok).map((r) => WIFI_BANDA_TXT[r.banda]);
+    await onuAcciones.registrar({
+      abonado: session.customer.abonado,
+      accion: 'clave_wifi',
+      origen: 'bot',
+      ok: resultados.every((r) => r.ok),
+      detalle: `${session.wifiModelo || ''} — ` + resultados.map((r) => `${WIFI_BANDA_TXT[r.banda]}: ${r.ok ? 'ok' : 'falló'} (${r.respuesta || 'sin respuesta'})`).join(' | '),
+    });
     anotar(phone).eventos.push({
       tipo: 'clave_wifi',
       nota: `${session.wifiModelo || ''} — ` + resultados.map((r) => `${WIFI_BANDA_TXT[r.banda]}: ${r.ok ? 'ok' : 'falló'} (${r.respuesta || 'sin respuesta'})`).join(' | ').slice(0, 500),

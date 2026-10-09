@@ -157,6 +157,23 @@ async function migrar() {
       cerrado_en TIMESTAMPTZ
     );
     CREATE INDEX IF NOT EXISTS bot_eventos_red_estado ON bot_eventos_red (estado, actualizado_en);
+
+    -- Bitácora de acciones sobre la ONU (bot y tablero de gestión de clientes). Sin contraseñas.
+    CREATE TABLE IF NOT EXISTS bot_acciones_onu (
+      id BIGSERIAL PRIMARY KEY,
+      abonado TEXT NOT NULL,
+      accion TEXT NOT NULL,                   -- reiniciar | encender_catv | clave_wifi | pasar_mda
+      origen TEXT NOT NULL,                   -- bot | tablero
+      usuario TEXT,                           -- usuario del portal (null si fue el bot)
+      ok BOOLEAN NOT NULL,
+      detalle TEXT,
+      creado_en TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS bot_acciones_onu_abonado ON bot_acciones_onu (abonado, creado_en);
+
+    -- Casos creados desde el tablero de gestión de clientes (pasar a MDA)
+    ALTER TABLE bot_conversaciones ADD COLUMN IF NOT EXISTS origen TEXT;      -- null/whatsapp | tablero
+    ALTER TABLE bot_conversaciones ADD COLUMN IF NOT EXISTS creada_por TEXT;  -- usuario del portal
   `);
   console.log('🗄️ Tablas del bot listas en Postgres');
 }

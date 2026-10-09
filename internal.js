@@ -81,6 +81,9 @@ function crear() {
     }
   });
 
+  // Tablero de gestión de clientes (ficha de la ONU, gráficas, acciones, casos MDA)
+  require('./internalClientes').montar(r);
+
   r.post('/send', async (req, res) => {
     const { conversacion_id: convId, telefono, texto, agente_id: agente } = req.body || {};
     const autor = req.body?.autor === 'bot' ? 'bot' : 'agente';
