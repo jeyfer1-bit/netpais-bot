@@ -1,7 +1,7 @@
 // novedad.js
 //
 // Clasifica, de forma conversacional, qué tipo de novedad presenta
-// el cliente entre las 6 categorías definidas. No usa un menú rígido:
+// el cliente entre las 7 categorías definidas. No usa un menú rígido:
 // intenta reconocer la intención por palabras clave en lo que el
 // cliente escriba con sus propias palabras.
 
@@ -18,6 +18,8 @@ function matchesAny(text, keywords) {
 }
 
 const CATEGORY_KEYWORDS = {
+  // Cambio de contraseña del WiFi (el texto ya viene sin tildes: "contraseña" → "contrasena")
+  clavewifi: ['contrasena', 'clave', 'password'],
   orden: [
     'orden',
     'mantenimiento',
@@ -107,21 +109,24 @@ const NUMBER_TO_CATEGORY = {
   4: 'tv',
   5: 'aplicaciones',
   6: 'velocidadcontratada',
+  7: 'clavewifi',
 };
 
 /**
- * Intenta clasificar el texto libre del cliente en una de las 6
+ * Intenta clasificar el texto libre del cliente en una de las 7
  * categorías. Devuelve null si no logra identificarla con confianza.
  */
 function classify(text) {
   const t = normalize(text);
 
   // Acepta el número solo, o con frases naturales como "opción 2", "la 2", etc.
-  const numberMatch = t.match(/^(la |el |opcion |numero |es la |es el |la opcion |el numero |respuesta )?([1-6])\.?$/);
+  const numberMatch = t.match(/^(la |el |opcion |numero |es la |es el |la opcion |el numero |respuesta )?([1-7])\.?$/);
   if (numberMatch) return NUMBER_TO_CATEGORY[Number(numberMatch[2])];
 
   // Orden y TV se revisan primero porque usan palabras más específicas
   // (evita que "no tengo internet" se confunda, por ejemplo).
+  // Cambio de clave primero: "clave" o "contraseña" no se confunden con otra novedad.
+  if (matchesAny(t, CATEGORY_KEYWORDS.clavewifi)) return 'clavewifi';
   if (matchesAny(t, CATEGORY_KEYWORDS.orden)) return 'orden';
   if (matchesAny(t, CATEGORY_KEYWORDS.tv)) return 'tv';
   if (matchesAny(t, CATEGORY_KEYWORDS.sinservicio)) return 'sinservicio';
@@ -163,6 +168,8 @@ function buildConfirmationMessage(category, detalle) {
       return 'Entiendo: tienes una novedad con una página web o aplicación específica.';
     case 'velocidadcontratada':
       return 'Entiendo: tus test de velocidad no corresponden con las megas que tienes contratadas.';
+    case 'clavewifi':
+      return 'Entiendo: quieres cambiar la contraseña de tu red WiFi.';
     default:
       return null;
   }
@@ -175,7 +182,8 @@ const CLARIFYING_MESSAGE =
   '3️⃣ No tienes internet en absoluto (luces en rojo, fibra rota, equipo dañado)\n' +
   '4️⃣ Problemas con el servicio de televisión\n' +
   '5️⃣ Problemas con una página web o aplicación específica (no carga, no abre)\n' +
-  '6️⃣ Tu test de velocidad no corresponde con las megas contratadas\n\n' +
+  '6️⃣ Tu test de velocidad no corresponde con las megas contratadas\n' +
+  '7️⃣ Cambiar la contraseña de tu WiFi\n\n' +
   'Puedes responderme con el número, o contarme con tus propias palabras. 🙂';
 
 module.exports = {

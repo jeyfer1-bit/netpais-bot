@@ -87,6 +87,8 @@ app.post('/webhook', (req, res) => {
   });
 });
 
+const TEXTO_CLAVE_OCULTA = '🔒 [contraseña WiFi oculta]';
+
 async function atender(message) {
   const from = message.from; // número del usuario, ej: "573001234567"
   const type = message.type;
@@ -110,7 +112,9 @@ async function atender(message) {
       }
 
       c = await conv.obtenerOCrear(from);
-      const nuevo = await conv.registrarEntrante(c, { tipo: type, texto: textoOriginal, mediaId, waId });
+      // En los pasos donde el cliente escribe su contraseña WiFi, el texto no se guarda
+      const texto = type === 'text' && flow.esPasoSensible(c.sesion?.step) ? TEXTO_CLAVE_OCULTA : textoOriginal;
+      const nuevo = await conv.registrarEntrante(c, { tipo: type, texto, mediaId, waId });
       if (!nuevo) {
         console.log(`↩️ Mensaje repetido de ${from} (${waId}): ya se había procesado`);
         return;
@@ -130,6 +134,13 @@ async function atender(message) {
   // ------ Con un humano: el bot calla y solo registra ------
   if (c && conv.ESTADOS_SILENCIO.includes(c.estado)) {
     console.log(`🤫 ${from} está ${c.estado} (cola ${c.cola}): el bot no responde`);
+    return;
+  }
+
+  // ------ Paso de contraseña WiFi: solo texto, y nunca a los logs ------
+  const pasoSensible = flow.esPasoSensible((c ? c.sesion : flow.leerSesion(from))?.step);
+  if (pasoSensible && type !== 'text') {
+    await sendTextMessage(from, 'Por seguridad, escríbeme la contraseña como texto, no como nota de voz ni imagen 🔐');
     return;
   }
 
@@ -179,7 +190,7 @@ async function atender(message) {
     return;
   }
 
-  console.log(`📩 Mensaje de ${from} (${type}): ${textBody}`);
+  console.log(`📩 Mensaje de ${from} (${type}): ${pasoSensible ? TEXTO_CLAVE_OCULTA : textBody}`);
 
   // ------ Flujo conversacional (pipeline) ------
   // A partir de aquí, textBody es siempre texto plano (venga de donde

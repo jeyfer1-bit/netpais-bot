@@ -27,6 +27,7 @@ const NOVEDAD_CATEGORIES = [
   'tv',
   'aplicaciones',
   'velocidadcontratada',
+  'clavewifi',
 ];
 
 /**
@@ -106,7 +107,7 @@ async function describeImage(buffer, mimeType = 'image/jpeg', contextHint = '') 
 /**
  * Respaldo de clasificación de novedad (Nivel 1), usado solo cuando
  * classify() de novedad.js no logra identificar la categoría por
- * palabras clave. Devuelve una de las 6 categorías válidas, o null.
+ * palabras clave. Devuelve una de las 7 categorías válidas, o null.
  * @param {string} text
  * @returns {Promise<string|null>}
  */
@@ -121,7 +122,8 @@ async function classifyNovedadWithAI(text) {
         '- sinservicio: no tiene internet en absoluto\n' +
         '- tv: problema con el servicio de televisión\n' +
         '- aplicaciones: problema con una app o página web específica (no carga, no abre)\n' +
-        '- velocidadcontratada: su test de velocidad no corresponde con las megas contratadas (ej: "no me dan las megas", "no me da la velocidad que pague")\n\n' +
+        '- velocidadcontratada: su test de velocidad no corresponde con las megas contratadas (ej: "no me dan las megas", "no me da la velocidad que pague")\n' +
+        '- clavewifi: quiere cambiar la contraseña o clave de su red WiFi\n\n' +
         'Si no puedes clasificarlo con confianza en ninguna de estas categorías, responde exactamente: ninguna',
     },
   ];

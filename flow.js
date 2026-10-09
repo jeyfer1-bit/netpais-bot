@@ -23,6 +23,8 @@ const {
   enableOnuCatv,
   getOnuTrafficGraph,
   getOnuSignalGraph,
+  revisarCambioWifi,
+  cambiarClaveWifi,
 } = require('./smartolt');
 const { sendImageMessage } = require('./whatsapp');
 const {
@@ -74,7 +76,49 @@ const STEPS = {
   SIN_ASK_LED_RED: 'SIN_ASK_LED_RED', // ¿ve algún LED en rojo?
   SIN_ASK_SERVICE_NOW: 'SIN_ASK_SERVICE_NOW', // sin LED rojo: ¿ya tiene servicio?
   SIN_ASK_PERSISTS_AFTER_VALIDATIONS: 'SIN_ASK_PERSISTS_AFTER_VALIDATIONS', // el sistema muestra servicio activo: ¿persiste la falla?
+
+  // Flujo: cambio de contraseña WiFi
+  WIFI_ASK_BAND: 'WIFI_ASK_BAND', // ¿2,4 GHz, 5 GHz o ambas?
+  WIFI_ASK_PASSWORD: 'WIFI_ASK_PASSWORD', // escribir la nueva contraseña
+  WIFI_CONFIRM_PASSWORD: 'WIFI_CONFIRM_PASSWORD', // escribirla otra vez
 };
+
+// ---------------------------------------------------------------
+// Cambio de contraseña WiFi — manejo de la contraseña
+// ---------------------------------------------------------------
+// La contraseña NUNCA se guarda en la sesión (la sesión se guarda en
+// Postgres) ni en los logs: la primera vez que el cliente la escribe
+// queda solo en memoria, por 10 minutos, hasta que la confirme. Si el
+// servidor se reinicia en medio, se le pide otra vez.
+// server.js usa esPasoSensible() para no guardar ni loguear el texto de
+// esos mensajes.
+const WIFI_PASSWORD_RE = /^[A-Za-z0-9!@#$%*_\-.+=?]{8,63}$/;
+const WIFI_PENDIENTE_TTL_MS = 10 * 60 * 1000;
+const WIFI_MAX_INTENTOS = 3;
+const clavesWifiPendientes = new Map(); // telefono -> { password, expira }
+
+const PASOS_SENSIBLES = ['WIFI_ASK_PASSWORD', 'WIFI_CONFIRM_PASSWORD'];
+function esPasoSensible(step) {
+  return PASOS_SENSIBLES.includes(step);
+}
+
+const WIFI_BANDA_TXT = { '24': '2,4 GHz', '5': '5 GHz' };
+
+function mensajePedirClaveWifi() {
+  return (
+    'Escríbeme la nueva contraseña 🔐\n\n' +
+    'Debe tener entre 8 y 63 caracteres, sin espacios. Puedes usar letras, números y estos símbolos: ! @ # $ % * _ - . + = ?\n\n' +
+    'Ten en cuenta que al cambiarla, todos tus dispositivos se desconectarán del WiFi y tendrás que volver a conectarlos con la nueva contraseña.'
+  );
+}
+
+function classifyWifiBand(text) {
+  const t = normalize(text);
+  if (/\b(ambas|ambos|las dos|los dos|todas|todos)\b/.test(t) || t === '3') return ['24', '5'];
+  if (/2\s*[.,]?\s*4/.test(t) || t === '1') return ['24'];
+  if (/(^|\D)5(\D|$)/.test(t) || t === '2') return ['5'];
+  return null;
+}
 
 const SPEED_TEST_TOLERANCE = 0.9; // -10% de tolerancia sobre el plan contratado
 
@@ -710,6 +754,42 @@ async function procesar(phone, text) {
         }
         replies.push('¿Hay algo más en lo que pueda ayudarte? (sí/no)');
         session.step = STEPS.ASK_ANYTHING_ELSE;
+        return replies;
+      }
+
+      if (session.novedadCategory === 'clavewifi') {
+        let rev;
+        try {
+          rev = await revisarCambioWifi(session.customer.abonado);
+        } catch (err) {
+          console.error('Error revisando cambio de WiFi:', err.message);
+          rev = { ok: false, motivo: 'error' };
+        }
+
+        if (!rev.ok) {
+          const mensaje =
+            rev.motivo === 'offline'
+              ? 'Veo que tu equipo no está conectado en este momento, así que no puedo cambiar la contraseña desde aquí 🙏 Te voy a comunicar con un asesor de MDA para que te ayude. 🙌'
+              : 'Revisé tu equipo y el cambio de contraseña no se puede hacer desde aquí 🙏 Te voy a comunicar con un asesor de MDA para que te ayude. 🙌';
+          return transferir(phone, replies, 'mda', `wifi_${rev.motivo}`, mensaje);
+        }
+
+        session.wifiPuertos = rev.puertos;
+        session.wifiPuertosBanda = rev.puertosBanda;
+        session.wifiIntentos = 0;
+        if (rev.dual) {
+          replies.push(
+            'Listo, tu equipo permite hacer el cambio desde aquí 🙌 ¿Para cuál red quieres cambiar la contraseña?\n\n' +
+            '1️⃣ 2,4 GHz\n2️⃣ 5 GHz\n3️⃣ Ambas'
+          );
+          session.step = STEPS.WIFI_ASK_BAND;
+          return replies;
+        }
+
+        session.wifiBandas = ['24'];
+        replies.push('Listo, tu equipo permite hacer el cambio desde aquí 🙌 Tu equipo maneja una sola red WiFi (2,4 GHz), así que el cambio aplica para esa.');
+        replies.push(mensajePedirClaveWifi());
+        session.step = STEPS.WIFI_ASK_PASSWORD;
         return replies;
       }
 
@@ -1463,6 +1543,93 @@ async function procesar(phone, text) {
   }
 
   // -------- Paso: ¿necesita algo más tras consultar la orden? --------
+  // -------- Cambio de contraseña WiFi: ¿qué banda? --------
+  if (session.step === STEPS.WIFI_ASK_BAND) {
+    const bandas = classifyWifiBand(text);
+    if (!bandas) {
+      replies.push('Perdón, no entendí 🙏 Respóndeme con el número: 1️⃣ 2,4 GHz, 2️⃣ 5 GHz o 3️⃣ Ambas.');
+      return replies;
+    }
+    session.wifiBandas = bandas;
+    replies.push(mensajePedirClaveWifi());
+    session.step = STEPS.WIFI_ASK_PASSWORD;
+    return replies;
+  }
+
+  // -------- Cambio de contraseña WiFi: escribir la contraseña --------
+  if (session.step === STEPS.WIFI_ASK_PASSWORD) {
+    const password = String(text).trim();
+    if (!WIFI_PASSWORD_RE.test(password)) {
+      session.wifiIntentos = (session.wifiIntentos || 0) + 1;
+      if (session.wifiIntentos >= WIFI_MAX_INTENTOS) {
+        return transferir(phone, replies, 'mda', 'wifi_clave_invalida', 'No logramos definir una contraseña válida por aquí 🙏 Te voy a comunicar con un asesor de MDA para que te ayude con el cambio. 🙌');
+      }
+      replies.push(
+        'Esa contraseña no cumple las condiciones 🙏 Recuerda: entre 8 y 63 caracteres, sin espacios, con letras, números y solo estos símbolos: ! @ # $ % * _ - . + = ?\n\nEscríbela de nuevo, por favor.'
+      );
+      return replies;
+    }
+    clavesWifiPendientes.set(phone, { password, expira: Date.now() + WIFI_PENDIENTE_TTL_MS });
+    replies.push('Para evitar errores, escríbemela una vez más 🔁');
+    session.step = STEPS.WIFI_CONFIRM_PASSWORD;
+    return replies;
+  }
+
+  // -------- Cambio de contraseña WiFi: confirmar y aplicar --------
+  if (session.step === STEPS.WIFI_CONFIRM_PASSWORD) {
+    const pendiente = clavesWifiPendientes.get(phone);
+    clavesWifiPendientes.delete(phone);
+
+    if (!pendiente || pendiente.expira < Date.now()) {
+      replies.push('Pasó un tiempo y por seguridad necesito que la escribas de nuevo 🙏');
+      replies.push(mensajePedirClaveWifi());
+      session.step = STEPS.WIFI_ASK_PASSWORD;
+      return replies;
+    }
+
+    if (String(text).trim() !== pendiente.password) {
+      session.wifiIntentos = (session.wifiIntentos || 0) + 1;
+      if (session.wifiIntentos >= WIFI_MAX_INTENTOS) {
+        return transferir(phone, replies, 'mda', 'wifi_no_coincide', 'Las contraseñas no han coincidido 🙏 Te voy a comunicar con un asesor de MDA para que te ayude con el cambio. 🙌');
+      }
+      replies.push('Las dos contraseñas no coinciden 🙏 Empecemos de nuevo: escríbeme la nueva contraseña.');
+      session.step = STEPS.WIFI_ASK_PASSWORD;
+      return replies;
+    }
+
+    const bandas = session.wifiBandas?.length ? session.wifiBandas : ['24'];
+    const resultados = [];
+    for (const banda of bandas) {
+      // Una banda a la vez: la OLT procesa los comandos de a uno
+      const r = await cambiarClaveWifi(session.customer.abonado, banda, pendiente.password, session.wifiPuertos || {}, session.wifiPuertosBanda || {});
+      resultados.push({ banda, ...r });
+    }
+    const okTxt = resultados.filter((r) => r.ok).map((r) => WIFI_BANDA_TXT[r.banda]);
+    const falloTxt = resultados.filter((r) => !r.ok).map((r) => WIFI_BANDA_TXT[r.banda]);
+    anotar(phone).eventos.push({
+      tipo: 'clave_wifi',
+      nota: resultados.map((r) => `${WIFI_BANDA_TXT[r.banda]}: ${r.ok ? 'ok' : 'falló'} (${r.respuesta || 'sin respuesta'})`).join(' | ').slice(0, 500),
+    });
+
+    if (falloTxt.length > 0) {
+      const mensaje =
+        okTxt.length > 0
+          ? `Cambié la contraseña de tu red ${okTxt.join(' y ')} ✅, pero no pude aplicar el cambio en la red ${falloTxt.join(' y ')} 🙏 Te voy a comunicar con un asesor de MDA para que termine el cambio. 🙌`
+          : 'No pude aplicar el cambio de contraseña en tu equipo en este momento 🙏 Te voy a comunicar con un asesor de MDA para que te ayude. 🙌';
+      return transferir(phone, replies, 'mda', 'wifi_error_cambio', mensaje);
+    }
+
+    replies.push(`✅ ¡Listo! Tu equipo confirmó el cambio: tu red WiFi ${okTxt.join(' y ')} ya tiene la nueva contraseña.`);
+    replies.push('Vuelve a conectar tus dispositivos con la nueva contraseña. Si alguno no se conecta, elige "olvidar red" en ese dispositivo y conéctate de nuevo.');
+    replies.push('¿Hay algo más en lo que pueda ayudarte? (sí/no)');
+    session.wifiBandas = null;
+    session.wifiPuertos = null;
+    session.wifiPuertosBanda = null;
+    session.wifiIntentos = 0;
+    session.step = STEPS.ASK_ANYTHING_ELSE;
+    return replies;
+  }
+
   if (session.step === STEPS.ASK_ANYTHING_ELSE) {
     if (isAffirmative(text) && String(session.customer?.estado || '').toLowerCase() === 'cortado') {
       // Con el servicio cortado no hay soporte técnico: lo que necesite es del área administrativa
@@ -1489,6 +1656,9 @@ async function procesar(phone, text) {
       session.novPlanMbps = null;
       session.novSpeedMethod = null;
       session.novTvPendingOrder = null;
+      session.wifiBandas = null;
+      session.wifiPuertos = null;
+      session.wifiIntentos = 0;
       session.step = STEPS.ASK_REQUIREMENT;
       return replies;
     }
@@ -1514,4 +1684,4 @@ async function procesar(phone, text) {
   return replies;
 }
 
-module.exports = { handleMessage, tomarAcciones, cargarSesion, leerSesion, STEPS };
+module.exports = { handleMessage, tomarAcciones, cargarSesion, leerSesion, esPasoSensible, STEPS };
