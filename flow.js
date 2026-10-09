@@ -355,21 +355,6 @@ async function buildCrearOrdenMessage(abonado, detalleOrden) {
   return rewriteWarmly(base, criticalPhrases);
 }
 
-// -------- Incidente conocido: entrega de video de Google/YouTube --------
-// Basado en el comunicado oficial de Ufinet 08/2026. Se actualiza el
-// mensaje (o se retira este bloque) cuando Google confirme la solución.
-const KNOWN_INCIDENT_KEYWORDS = ['youtube', 'google'];
-
-function isKnownVideoIncident(appName) {
-  const t = normalize(appName);
-  return KNOWN_INCIDENT_KEYWORDS.some((k) => t.includes(k));
-}
-
-const KNOWN_INCIDENT_MESSAGE =
-  'Tenemos identificada esta situación 🙌 Actualmente hay una afectación en la entrega de contenido de video de Google/YouTube que impacta a varios usuarios en Colombia, especialmente entre las 7 p. m. y las 11 p. m.\n\n' +
-  'Esto ocurre porque los servidores de caché de Google en Bogotá llegan a su límite de capacidad en esas horas, y el contenido empieza a traerse desde ciudades más lejanas (Miami, Nueva York, y en algunos casos Brasil o Chile), lo que aumenta la latencia. No es una falla de nuestra red: nuestros enlaces están activos y sin pérdida de paquetes.\n\n' +
-  'Ufinet está en seguimiento diario con Google, quien informó que la ampliación de capacidad en Bogotá estaría entrando en operación hacia finales de agosto de 2026.';
-
 // -------- Flujo: velocidad contratada vs. test de velocidad --------
 
 // Extrae el número de Mbps de textos como "50M", "50 Mbps", "50MB", etc.
@@ -1550,13 +1535,6 @@ async function procesar(phone, text) {
   if (session.step === STEPS.NOV_APP_ASK_NAME) {
     const appName = text.trim();
     session.novAppName = appName;
-
-    if (isKnownVideoIncident(appName)) {
-      replies.push(KNOWN_INCIDENT_MESSAGE);
-      replies.push('¿Hay algo más en lo que pueda ayudarte? (sí/no)');
-      session.step = STEPS.ASK_ANYTHING_ELSE;
-      return replies;
-    }
 
     replies.push(
       `Vamos a hacer una validación con "${appName}":\n\n` +
