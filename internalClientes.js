@@ -8,7 +8,8 @@
 //   GET  /internal/onu/:abonado/bitacora        acciones de los últimos 90 días (bot + tablero)
 //   POST /internal/onu/:abonado/reiniciar       { usuario }                      máx. 2 por ONU en 24 h
 //   POST /internal/onu/:abonado/encender-catv   { usuario }                      nunca se apaga
-//   POST /internal/onu/:abonado/clave-wifi      { usuario, bandas, clave, confirmacion }
+//   POST /internal/onu/:abonado/clave-wifi      { usuario, bandas, clave, confirmacion, nombres?: { '24'?, '5'? } }
+//        nombres: nombre nuevo de la red por banda (opcional; obligatorio si la red no tiene nombre)
 //   POST /internal/casos-mda                    { usuario, abonado, nombre?, telefono?, nota }
 //
 // "usuario" es el usuario del portal que hace la acción: queda en la bitácora.
@@ -24,6 +25,9 @@ const { findCustomer, limpiarId } = require('./customerLookup');
 // Mismas reglas que el bot (flow.js)
 const WIFI_PASSWORD_RE = /^[A-Za-z0-9!@#$%*_\-.+=?]{8,63}$/;
 const BANDA_TXT = { '24': '2,4 GHz', '5': '5 GHz' };
+const PUERTO_BANDA = { '24': 'wifi_0/1', '5': 'wifi_0/5' };
+// Nombre de red (SSID): 1 a 32 caracteres, letras, números, espacio, guion, guion bajo y punto (sin tildes ni ñ)
+const SSID_RE = /^[A-Za-z0-9 _.\-]{1,32}$/;
 const PERIODOS = ['hourly', 'daily', 'weekly', 'monthly'];
 
 const MAX_ACCIONES_MIN = 10; // acciones por usuario por minuto
@@ -210,6 +214,17 @@ function montar(r) {
     const noDisponible = bandas.find((b) => !disponibles.includes(b));
     if (noDisponible) return res.status(400).json({ error: `Esta ONU no tiene red de ${BANDA_TXT[noDisponible]}.` });
 
+    // Nombre de cada red: el actual, o el nuevo si lo cambian (obligatorio si la red no tiene nombre)
+    const pedidos = req.body?.nombres && typeof req.body.nombres === 'object' ? req.body.nombres : {};
+    const nombreNuevo = {};
+    for (const b of bandas) {
+      const actual = rev.puertos?.[PUERTO_BANDA[b]]?.ssid || null;
+      const nuevo = String(pedidos[b] ?? '').trim();
+      if (nuevo && !SSID_RE.test(nuevo)) return res.status(400).json({ error: `El nombre de la red de ${BANDA_TXT[b]} debe tener de 1 a 32 caracteres: letras, números, espacio, guion, guion bajo o punto (sin tildes ni ñ).` });
+      if (!actual && !nuevo) return res.status(400).json({ error: `La red de ${BANDA_TXT[b]} no tiene nombre: escribe el nombre de la red.`, faltaNombre: b });
+      if (nuevo && nuevo !== actual) nombreNuevo[b] = nuevo;
+    }
+
     const resultados = [];
     for (const banda of bandas) {
       // Mismo criterio que el bot: si el modelo/banda ya se descartó, no se intenta
@@ -217,19 +232,19 @@ function montar(r) {
         resultados.push({ banda, ok: false, noCompatible: true, respuesta: 'Modelo no compatible con el cambio remoto' });
         continue;
       }
-      const r2 = await smartolt.cambiarClaveWifi(a, banda, clave, rev.puertos || {});
-      resultados.push({ banda, ...r2 });
+      const r2 = await smartolt.cambiarClaveWifi(a, banda, clave, rev.puertos || {}, { ssid: nombreNuevo[banda] });
+      resultados.push({ banda, ...r2, nombre: nombreNuevo[banda] || null });
       await wifiCompat.registrarIntento({ modelo: rev.modelo, banda, puerto: r2.puerto, modo: rev.modo, abonado: a, ok: r2.ok, ssidConservado: r2.ssidConservado, respuesta: r2.respuesta });
     }
     const ok = resultados.every((x) => x.ok);
     await onuAcciones.registrar({
       abonado: a, accion: 'clave_wifi', origen: 'tablero', usuario: req.usuario, ok,
-      detalle: `${rev.modelo} — ` + resultados.map((x) => `${BANDA_TXT[x.banda]}: ${x.ok ? 'ok' : 'falló'} (${x.respuesta || 'sin respuesta'})`).join(' | '),
+      detalle: `${rev.modelo} — ` + resultados.map((x) => `${BANDA_TXT[x.banda]}: ${x.ok ? 'ok' : 'falló'}${x.nombre ? `, nombre "${x.nombre}"` : ''} (${x.respuesta || 'sin respuesta'})`).join(' | '),
     });
     return res.status(ok ? 200 : 502).json({
       ok,
       modelo: rev.modelo,
-      resultados: resultados.map((x) => ({ banda: x.banda, ok: x.ok, noCompatible: Boolean(x.noCompatible), ssidConservado: x.ssidConservado ?? null, respuesta: x.respuesta || null })),
+      resultados: resultados.map((x) => ({ banda: x.banda, ok: x.ok, noCompatible: Boolean(x.noCompatible), nombre: x.nombre || null, ssidConservado: x.ssidConservado ?? null, respuesta: x.respuesta || null })),
       mensaje: ok ? 'La ONU confirmó el cambio de contraseña.' : 'No se pudo aplicar el cambio en todas las bandas: pasa el caso a MDA.',
     });
   });

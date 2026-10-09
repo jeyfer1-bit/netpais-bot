@@ -442,28 +442,33 @@ async function revisarCambioWifi(abonado) {
   const puertos = leerPuertosWifi(det);
   const nombres = Object.keys(puertos);
   const bandas = nombres.length === 0 ? null : nombres.includes(PUERTO_5) ? ['24', '5'] : ['24'];
+  // Bandas cuya red principal tiene nombre (SSID). El bot solo ofrece estas; el tablero pide el nombre si falta.
+  const bandasConNombre = bandas ? bandas.filter((b) => puertos[PUERTO_BANDA[b]]?.ssid) : null;
   console.log(
     `📶 Cambio WiFi ${abonado}: estado=${statusData.onu_status}, modo=${det.mode}, modelo=${modelo}, puertos=${nombres.join(',') || 'sin reportar'}`
   );
 
   if (String(statusData.onu_status || '').toLowerCase() !== 'online') return { ok: false, motivo: 'offline' };
-  return { ok: true, modelo, modo: det.mode || null, bandas, puertos };
+  return { ok: true, modelo, modo: det.mode || null, bandas, bandasConNombre, puertos };
 }
 
 /**
  * Cambia la contraseña de una banda (WPA2), reenviando el SSID y el DHCP
  * actuales cuando SmartOLT los reporta, y después verifica que el SSID
  * no haya cambiado. NUNCA se loguea la contraseña.
+ * Con opciones.ssid se cambia también el nombre de la red (tablero de clientes); la verificación
+ * entonces confirma que quedó el nombre nuevo.
  * @returns {Promise<{ok:boolean, respuesta:string|null, puerto:string, ssidConservado:boolean|null}>}
  */
-async function cambiarClaveWifi(abonado, banda, password, puertos = {}) {
+async function cambiarClaveWifi(abonado, banda, password, puertos = {}, opciones = {}) {
   const puerto = PUERTO_BANDA[banda];
   const onu = await ubicarOnu(abonado);
   if (!puerto || !onu) return { ok: false, respuesta: 'ONU no encontrada', puerto, ssidConservado: null };
 
   const antes = puertos[puerto] || {};
+  const ssidEsperado = opciones.ssid || antes.ssid || null;
   const form = new URLSearchParams({ wifi_port: puerto, password, authentication_mode: 'WPA2' });
-  if (antes.ssid) form.set('ssid', antes.ssid);
+  if (ssidEsperado) form.set('ssid', ssidEsperado);
   if (antes.dhcp) form.set('dhcp', antes.dhcp);
 
   let ok = false;
@@ -483,12 +488,12 @@ async function cambiarClaveWifi(abonado, banda, password, puertos = {}) {
     respuesta = err.message;
   }
 
-  // Verificación: ¿el SSID sigue igual? (solo si SmartOLT lo reportaba antes)
+  // Verificación: ¿la red quedó con el nombre esperado? (el de antes, o el nuevo si se cambió)
   let ssidConservado = null;
-  if (ok && antes.ssid) {
+  if (ok && ssidEsperado) {
     const det = await fetchOnuField(onu.baseUrl, onu.apiKey, onu.externalId, '/api/onu/get_onu_details');
     const despues = leerPuertosWifi(det?.onu_details)[puerto];
-    if (despues && despues.ssid) ssidConservado = despues.ssid === antes.ssid;
+    if (despues && despues.ssid) ssidConservado = despues.ssid === ssidEsperado;
   }
   if (ssidConservado === false) ok = false; // la clave cambió pero la red quedó con otro nombre: lo arregla MDA
 

@@ -804,7 +804,11 @@ async function procesar(phone, text) {
 
         // Se intenta con cualquier modelo, salvo las bandas que ya se probaron
         // varias veces sin éxito en ese modelo (wifiCompat.js)
-        const bandasEquipo = rev.bandas || ['24', '5'];
+        // Solo se ofrecen las bandas cuya red tiene nombre (SSID): una red sin nombre la configura MDA
+        if (rev.bandasConNombre && rev.bandasConNombre.length === 0) {
+          return transferir(phone, replies, 'mda', 'wifi_sin_nombre', 'Revisé tu equipo y tu red WiFi necesita una configuración que no puedo hacer desde aquí 🙏 Te voy a comunicar con un asesor de MDA para que te ayude. 🙌');
+        }
+        const bandasEquipo = rev.bandasConNombre || rev.bandas || ['24', '5'];
         const bandas = [];
         for (const b of bandasEquipo) {
           if ((await wifiCompat.estado(rev.modelo, b)) !== 'no_compatible') bandas.push(b);
@@ -827,7 +831,7 @@ async function procesar(phone, text) {
 
         session.wifiBandas = bandas;
         replies.push(
-          bandasEquipo.length === 1
+          rev.bandas && rev.bandas.length === 1
             ? 'Tu equipo maneja una sola red WiFi (2,4 GHz), así que el cambio aplica para esa.'
             : `Desde aquí puedo cambiar la contraseña de tu red de ${WIFI_BANDA_TXT[bandas[0]]}.`
         );
