@@ -2,6 +2,7 @@
 // (módulo /clientes de netpais-reporte). Se montan dentro de /internal, con la misma
 // autenticación (X-Bot-Secret) que el resto de endpoints internos.
 //
+//   GET  /internal/clientes?q=                  busca en SaePlus por abonado o cédula/NIT (mismo flujo del bot)
 //   GET  /internal/onu/:abonado                 ficha técnica en vivo + vecinos PON + falla masiva + reinicios
 //   GET  /internal/onu/:abonado/grafica         ?tipo=trafico|senal&periodo=hourly|daily|weekly|monthly → PNG
 //   GET  /internal/onu/:abonado/bitacora        acciones de los últimos 90 días (bot + tablero)
@@ -18,6 +19,7 @@ const wifiCompat = require('./wifiCompat');
 const eventosRed = require('./eventosRed');
 const conversaciones = require('./conversaciones');
 const db = require('./db');
+const { findCustomer, limpiarId } = require('./customerLookup');
 
 // Mismas reglas que el bot (flow.js)
 const WIFI_PASSWORD_RE = /^[A-Za-z0-9!@#$%*_\-.+=?]{8,63}$/;
@@ -75,6 +77,22 @@ function montar(r) {
     req.usuario = u;
     next();
   };
+
+  // ---------- Búsqueda de clientes (abonado o cédula/NIT) ----------
+  r.get('/clientes', consulta, async (req, res) => {
+    const q = limpiarId(req.query.q);
+    if (!q) return res.status(400).json({ error: 'Escribe un número de abonado o de cédula/NIT válido.' });
+    try {
+      const filas = await findCustomer(q);
+      return res.json({
+        q,
+        clientes: filas.map((c) => ({ abonado: c.abonado, documento: c.documento, nombre: c.nombre, estado: c.estado, barrio: c.barrio, zona: c.zona, franquicia: c.franquicia || null })),
+      });
+    } catch (err) {
+      console.error('Búsqueda de clientes:', err.message);
+      return res.status(502).json({ error: 'No pude consultar SaePlus en este momento. Intenta de nuevo.' });
+    }
+  });
 
   // ---------- Ficha ----------
   r.get('/onu/:abonado', consulta, async (req, res) => {
